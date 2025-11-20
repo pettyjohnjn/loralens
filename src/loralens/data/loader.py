@@ -142,27 +142,75 @@ class ChunkedTextDataset(IterableDataset):
         self.chunk_cfg = chunk_cfg
         self.max_docs = max_docs
 
-    def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
+    def __iter__(self):
         tokenizer = self.tokenizer
         chunk_cfg = self.chunk_cfg
+        seq_len = chunk_cfg.seq_len
+        stride = chunk_cfg.stride or seq_len
 
-        doc_count = 0
-        for doc in self.text_source:
-            if self.max_docs is not None and doc_count >= self.max_docs:
-                break
-            doc_count += 1
+        # Mode 1: document-separated 
+        if chunk_cfg.document_separated:
+            doc_count = 0
+            for doc in self.text_source:
+                if self.max_docs is not None and doc_count >= self.max_docs:
+                    break
+                doc_count += 1
 
-            encoded = tokenizer(
-                doc,
-                add_special_tokens=chunk_cfg.add_special_tokens,
-                return_attention_mask=False,
-                return_token_type_ids=False,
-            )
+                encoded = tokenizer(
+                    doc,
+                    add_special_tokens=chunk_cfg.add_special_tokens,
+                    return_attention_mask=False,
+                    return_token_type_ids=False,
+                )
+                input_ids = encoded["input_ids"]
 
-            input_ids = encoded["input_ids"]
+                for chunk_ids in _yield_chunks_from_ids(input_ids, chunk_cfg):
+                    # No padding here; each chunk is already fixed length
+                    input_tensor = torch.tensor(chunk_ids, dtype=torch.long)
+                    attention_mask = torch.ones_like(input_tensor, dtype=torch.long)
+                    yield {
+                        "input_ids": input_tensor,
+                        "attention_mask": attention_mask,
+                    }
 
-            for chunk_ids in _yield_chunks_from_ids(input_ids, chunk_cfg):
-                # No padding here; each chunk is already fixed length
+        # Mode 2: concatenated stream across documents
+        else:
+            buffer: List[int] = []
+            doc_count = 0
+
+            for doc in self.text_source:
+                if self.max_docs is not None and doc_count >= self.max_docs:
+                    break
+                doc_count += 1
+
+                encoded = tokenizer(
+                    doc,
+                    add_special_tokens=chunk_cfg.add_special_tokens,
+                    return_attention_mask=False,
+                    return_token_type_ids=False,
+                )
+                input_ids = encoded["input_ids"]
+
+                # Append tokens for this document to the running buffer
+                buffer.extend(input_ids)
+
+                # While we have at least one full chunk, emit it
+                while len(buffer) >= seq_len:
+                    chunk_ids = buffer[:seq_len]
+                    # Drop `stride` tokens from the left (stride == seq_len ⇒ no overlap)
+                    buffer = buffer[stride:]
+
+                    input_tensor = torch.tensor(chunk_ids, dtype=torch.long)
+                    attention_mask = torch.ones_like(input_tensor, dtype=torch.long)
+                    yield {
+                        "input_ids": input_tensor,
+                        "attention_mask": attention_mask,
+                    }
+
+            # At the end of the stream, drop any leftover tail if drop_remainder=True
+            if not chunk_cfg.drop_remainder and buffer:
+                # Emit one final shorter chunk (will need dynamic padding collate_fn)
+                chunk_ids = buffer
                 input_tensor = torch.tensor(chunk_ids, dtype=torch.long)
                 attention_mask = torch.ones_like(input_tensor, dtype=torch.long)
                 yield {

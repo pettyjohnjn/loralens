@@ -21,3 +21,7 @@ def main(args: Optional[list[str]] = None):
     args = parser.parse_args(args=args)
     prog: Main = args.prog
     prog.execute()
+
+
+if __name__ == "__main__":
+    main()
