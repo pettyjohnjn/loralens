@@ -1,5 +1,3 @@
-# loralens/training/__init__.py
+from .loop import Train, LossChoice
 
-from .loop import Train
-
-__all__ = ["Train"]
+__all__ = ["Train", "LossChoice"]

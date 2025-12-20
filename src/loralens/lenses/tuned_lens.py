@@ -15,34 +15,32 @@ def _canonical_layer_id(layer: LayerId) -> str:
 
 class TunedLens(BaseLens):
     """
-    Tuned lens: one affine map per layer, followed by the model's readout head.
+    Tuned lens (tuned-lens style):
+      h_L -> (h_L + translator_L(h_L)) -> unembed -> logits
 
-    For layer ids L, we maintain:
-        projection[L]: Linear(hidden -> hidden)
-
-    Pipeline:
-        h_L -> projection_L(h_L) -> readout -> logits
+    translator_L is initialized to zero so the whole transform starts as identity.
     """
 
     def __init__(
         self,
         layer_ids: Iterable[LayerId],
         hidden_size: int,
-        readout: nn.Module,
+        unembed: nn.Module,
         *,
         vocab_size: Optional[int] = None,
         ignore_index: int = -100,
         loss_reduction: str = "mean",
         bias: bool = True,
-        init_identity: bool = True,
+        init_zero: bool = True,
     ) -> None:
         if vocab_size is None:
-            if isinstance(readout, nn.Linear):
-                vocab_size = readout.out_features
+            if isinstance(unembed, nn.Module) and hasattr(unembed, "vocab_size"):
+                vocab_size = int(getattr(unembed, "vocab_size"))
+            elif isinstance(unembed, nn.Linear):
+                vocab_size = unembed.out_features
             else:
                 raise ValueError(
-                    "Could not infer vocab_size automatically from readout. "
-                    "Pass `vocab_size` explicitly."
+                    "Could not infer vocab_size automatically. Pass vocab_size explicitly."
                 )
 
         super().__init__(
@@ -51,30 +49,27 @@ class TunedLens(BaseLens):
             loss_reduction=loss_reduction,
         )
 
-        self.readout = readout
+        self.unembed = unembed
         self.hidden_size = hidden_size
 
         layer_ids = list(layer_ids)
         self._layer_ids: List[str] = [_canonical_layer_id(l) for l in layer_ids]
 
-        self.projections = nn.ModuleDict(
-            {
-                lid: nn.Linear(hidden_size, hidden_size, bias=bias)
-                for lid in self._layer_ids
-            }
+        # In tuned-lens repo: they do not include final layer translator.
+        # We'll still register all ids you pass, but typical usage should pass all layers
+        # and allow the training loop to decide which ids to include.
+        self.translators = nn.ModuleDict(
+            {lid: nn.Linear(hidden_size, hidden_size, bias=bias) for lid in self._layer_ids}
         )
 
-        if init_identity:
-            self._init_identity()
+        if init_zero:
+            self._init_zero()
 
-    def _init_identity(self) -> None:
-        """
-        Initialize projections close to identity: W ~ I, b ~ 0.
-        """
-        for proj in self.projections.values():
-            nn.init.eye_(proj.weight)
-            if proj.bias is not None:
-                nn.init.zeros_(proj.bias)
+    def _init_zero(self) -> None:
+        for tr in self.translators.values():
+            tr.weight.data.zero_()
+            if tr.bias is not None:
+                tr.bias.data.zero_()
 
     def compute_logits(
         self,
@@ -83,28 +78,18 @@ class TunedLens(BaseLens):
         layer: Optional[LayerId] = None,
         **kwargs,
     ) -> torch.Tensor:
-        """
-        Select the per-layer projection and apply the readout head.
-        """
         if layer is None:
             raise ValueError("TunedLens requires a `layer` id to be provided.")
-
         lid = _canonical_layer_id(layer)
-        if lid not in self.projections:
-            raise KeyError(
-                f"Layer id {layer!r} (canonical {lid!r}) is not registered in this TunedLens."
-            )
-
-        proj = self.projections[lid]
+        if lid not in self.translators:
+            raise KeyError(f"Layer id {layer!r} (canonical {lid!r}) is not registered in this TunedLens.")
 
         batch, seq, hidden = activations.shape
         if hidden != self.hidden_size:
-            raise ValueError(
-                f"Expected activations last dim {self.hidden_size}, got {hidden}."
-            )
+            raise ValueError(f"Expected activations last dim {self.hidden_size}, got {hidden}.")
 
+        tr = self.translators[lid]
         flat = activations.reshape(batch * seq, hidden)
-        projected = proj(flat)
-        flat_logits = self.readout(projected)
-        logits = flat_logits.reshape(batch, seq, -1)
-        return logits
+        flat = flat + tr(flat)  # residual translator
+        flat_logits = self.unembed(flat)
+        return flat_logits.reshape(batch, seq, -1)
