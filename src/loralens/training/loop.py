@@ -1,3 +1,4 @@
+# src/loralens/training/loop.py
 from __future__ import annotations
 
 import logging
@@ -10,7 +11,6 @@ from pathlib import Path
 from typing import List, Literal, Optional, Union
 
 import torch
-import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -85,6 +85,9 @@ class Train:
     tokens_per_step: Optional[int] = 262_144
     max_microsteps: int = 512
 
+    # Chunk along T for KL. 0 disables chunking.
+    kl_t_chunk: int = 128
+
     output: Path = Path("lens.pt")
     seed: int = 0
     log_every: int = 1
@@ -113,13 +116,14 @@ class Train:
                 raise ValueError(f"Unknown loss={self.loss!r}; expected 'kl' or 'ce'.")
 
         if self.token_shift is None:
+            # KL compares same-position distributions; CE is next-token
             self.token_shift = 0 if self.loss == LossChoice.KL else 1
 
         ddp_state = init_ddp(backend=self.ddp_backend, enabled=self.ddp)
         _set_seed(self.seed + ddp_state.rank)
 
         tokenizer = self._load_tokenizer(ddp_state)
-        model = self._load_model(tokenizer=tokenizer, device=ddp_state.device, ddp_state=ddp_state)
+        model = self._load_model(tokenizer=tokenizer, device=ddp_state.device)
 
         def make_iter():
             dl = build_dataloader(
@@ -143,12 +147,16 @@ class Train:
         data_iter = make_iter()
 
         lens_dtype = (
-            torch.bfloat16 if (self.amp and self.amp_dtype == "bf16")
-            else torch.float16 if (self.amp and self.amp_dtype == "fp16")
+            torch.bfloat16
+            if (self.amp and self.amp_dtype == "bf16")
+            else torch.float16
+            if (self.amp and self.amp_dtype == "fp16")
             else torch.float32
         )
 
-        lens, layer_ids, hidden_size = self._build_lens(model=model, dtype=lens_dtype, device=ddp_state.device, ddp_state=ddp_state)
+        lens, layer_ids, hidden_size = self._build_lens(
+            model=model, dtype=lens_dtype, device=ddp_state.device
+        )
 
         if ddp_state.enabled:
             lens = DDP(
@@ -197,7 +205,7 @@ class Train:
             tok.pad_token = tok.eos_token if tok.eos_token is not None else "<pad>"
         return tok
 
-    def _load_model(self, tokenizer, device: torch.device, ddp_state: DDPState):
+    def _load_model(self, tokenizer, device: torch.device):
         model = AutoModelForCausalLM.from_pretrained(self.model_name, revision=self.model_revision)
         model.resize_token_embeddings(len(tokenizer))
         for p in model.parameters():
@@ -206,13 +214,12 @@ class Train:
         model.eval()
         return model
 
-    def _build_lens(self, model, dtype: torch.dtype, device: torch.device, ddp_state: DDPState):
+    def _build_lens(self, model, dtype: torch.dtype, device: torch.device):
         cfg = model.config
         num_layers = int(cfg.n_layer) if hasattr(cfg, "n_layer") else int(cfg.num_hidden_layers)
         hidden_size = int(cfg.n_embd) if hasattr(cfg, "n_embd") else int(cfg.hidden_size)
 
         layer_ids = [str(i) for i in range(num_layers)]
-
         unembed = HFUnembed(model)
 
         if self.lens_type == "tuned":
@@ -220,7 +227,13 @@ class Train:
         elif self.lens_type == "logit":
             lens = LogitLens(readout=unembed)
         elif self.lens_type == "lora":
-            lens = LoRALens(layer_ids=layer_ids, hidden_size=hidden_size, readout=unembed, r=self.lora_rank, init_identity_base=True)
+            lens = LoRALens(
+                layer_ids=layer_ids,
+                hidden_size=hidden_size,
+                readout=unembed,
+                r=self.lora_rank,
+                init_identity_base=True,
+            )
         else:
             raise ValueError(f"Unknown lens_type={self.lens_type!r}")
 
@@ -255,7 +268,7 @@ class Train:
             if ddp_state.device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(ddp_state.device)
                 torch.cuda.synchronize(ddp_state.device)
-            t0 = time.perf_counter()
+            t_step0 = time.perf_counter()
 
             optimizer.zero_grad(set_to_none=True)
 
@@ -263,7 +276,6 @@ class Train:
             accum_global_tokens = 0.0
             accum_loss_local = torch.zeros((), device=ddp_state.device, dtype=torch.float32)
             microsteps = 0
-            diag = {}
 
             while True:
                 microsteps += 1
@@ -272,7 +284,6 @@ class Train:
                 input_ids_cpu = batch["input_ids"]
                 attention_mask_cpu = batch["attention_mask"]
 
-                # Single all-reduce for accounting: [tokens, bytes]
                 if self.report_bits_per_byte:
                     local_tokens = float(attention_mask_cpu.sum().item())
                     local_bytes = float(max(estimate_batch_bytes(tokenizer, input_ids_cpu, attention_mask_cpu), 1))
@@ -281,7 +292,6 @@ class Train:
                     tokens_this_micro = float(bt[0].item())
                     bpb.update(tokens=float(bt[0].item()), nbytes=float(bt[1].item()))
                 else:
-                    # If not reporting bpb, we still need global tokens_this_micro for scaling/stopping.
                     local_tokens = float(attention_mask_cpu.sum().item())
                     t = torch.tensor([local_tokens], device=ddp_state.device, dtype=torch.float32)
                     t = all_reduce_sum(t, ddp_state)
@@ -289,49 +299,37 @@ class Train:
 
                 accum_global_tokens += tokens_this_micro
 
-                # Now move to GPU for compute
                 input_ids = input_ids_cpu.to(ddp_state.device, non_blocking=True)
                 attention_mask = attention_mask_cpu.to(ddp_state.device, non_blocking=True)
 
-                if ddp_state.is_main and (step % max(self.log_data_every, 1) == 0) and microsteps == 1:
-                    lengths = attention_mask_cpu.sum(dim=1).detach().cpu()
-                    diag = {
-                        "bsz": int(attention_mask_cpu.size(0)),
-                        "seq": int(attention_mask_cpu.size(1)),
-                        "min_len": int(lengths.min().item()) if lengths.numel() else 0,
-                        "max_len": int(lengths.max().item()) if lengths.numel() else 0,
-                        "mean_len": float(lengths.float().mean().item()) if lengths.numel() else 0.0,
-                        "pad_frac": float((1.0 - attention_mask_cpu.float().mean()).item()),
-                    }
-
+                # Teacher forward (frozen)
                 with torch.no_grad():
                     with autocast_ctx(ddp_state.device, self.amp, self.amp_dtype):
-                        outputs = model(
+                        model_out = model(
                             input_ids=input_ids,
                             attention_mask=attention_mask,
                             output_hidden_states=True,
                             use_cache=False,
+                            return_dict=False,
                         )
 
-                hidden_states = outputs.hidden_states
-                if hidden_states is None:
-                    raise RuntimeError("Model did not return hidden_states.")
-                per_layer_acts = hidden_states[1:]
+                # return_dict=False: (logits, hidden_states) for GPT-like CausalLM
+                teacher_logits_full = model_out[0]  # [B, T, V] bf16/fp16
+                hidden_states = model_out[1]
+                per_layer_acts = hidden_states[1:]  # drop embeddings
 
                 shift = max(int(self.token_shift or 0), 0)
                 if shift > 0:
-                    attn = attention_mask[:, shift:].contiguous()
+                    attn_full = attention_mask[:, shift:].contiguous()
                     acts = [h[:, :-shift, :].contiguous() for h in per_layer_acts]
-                    teacher_logits = outputs.logits[:, shift:, :].contiguous()
-                    labels = input_ids[:, shift:].contiguous()
+                    teacher_logits_full = teacher_logits_full[:, shift:, :].contiguous()
+                    labels_full = input_ids[:, shift:].contiguous()
                 else:
-                    attn = attention_mask
+                    attn_full = attention_mask
                     acts = [h.contiguous() for h in per_layer_acts]
-                    teacher_logits = outputs.logits
-                    labels = input_ids
+                    labels_full = input_ids
 
-                with torch.no_grad():
-                    teacher_logprobs = F.log_softmax(teacher_logits, dim=-1)
+                del model_out, hidden_states, per_layer_acts
 
                 n_layers = len(acts)
                 inv_layers = 1.0 / float(n_layers)
@@ -344,8 +342,15 @@ class Train:
                 )
                 micro_ctx = lens.no_sync() if (is_ddp and not micro_sync) else nullcontext()
 
+                T_eff = int(attn_full.size(1))
+                t_chunk = int(self.kl_t_chunk) if (self.loss == LossChoice.KL) else 0
+                if t_chunk <= 0 or t_chunk >= T_eff:
+                    t_slices = [(0, T_eff)]
+                else:
+                    t_slices = [(t0, min(t0 + t_chunk, T_eff)) for t0 in range(0, T_eff, t_chunk)]
+
                 with micro_ctx:
-                    for li, (lid, h) in enumerate(zip(layer_ids, acts)):
+                    for li, (lid, h_full) in enumerate(zip(layer_ids, acts)):
                         if is_ddp and micro_sync:
                             layer_ctx = lens.no_sync() if (li != n_layers - 1) else nullcontext()
                         else:
@@ -354,16 +359,57 @@ class Train:
                         with layer_ctx:
                             with autocast_ctx(ddp_state.device, self.amp, self.amp_dtype):
                                 if self.loss == LossChoice.KL:
-                                    out = lens(h, layer=lid, labels=None, attention_mask=None, return_logits=True, return_loss=False)
-                                    if out.logits is None:
-                                        raise RuntimeError("Lens.forward did not return logits.")
-                                    layer_loss = masked_kl_logtarget(
-                                        student_logits=out.logits,
-                                        teacher_logprobs=teacher_logprobs,
-                                        attention_mask=attn,
-                                    )
+                                    # accumulate exact mean KL across T chunks for this layer
+                                    loss_sum = torch.zeros((), device=ddp_state.device, dtype=torch.float32)
+                                    denom = torch.zeros((), device=ddp_state.device, dtype=torch.float32)
+
+                                    for t0, t1 in t_slices:
+                                        attn = attn_full[:, t0:t1].contiguous()
+                                        # cheap early skip on all-pad chunks
+                                        if attn.sum().item() == 0:
+                                            continue
+
+                                        h = h_full[:, t0:t1, :].contiguous()
+
+                                        out = lens(
+                                            h,
+                                            layer=lid,
+                                            labels=None,
+                                            attention_mask=None,
+                                            return_logits=True,
+                                            return_loss=False,
+                                        )
+                                        if out.logits is None:
+                                            raise RuntimeError("Lens.forward did not return logits.")
+
+                                        # Teacher logprobs for this chunk in autocast dtype (bf16/fp16)
+                                        # No explicit fp32 materialization of [B,t,V]
+                                        with torch.no_grad():
+                                            t_logits = teacher_logits_full[:, t0:t1, :].contiguous()
+                                            t_logprobs = torch.log_softmax(t_logits, dim=-1).contiguous()
+
+                                        chunk_sum = masked_kl_logtarget(
+                                            student_logits=out.logits,
+                                            teacher_logprobs=t_logprobs,
+                                            attention_mask=attn,
+                                            reduction="sum",
+                                        )
+                                        loss_sum = loss_sum + chunk_sum
+                                        denom = denom + attn.sum(dtype=torch.float32)
+
+                                        del out, chunk_sum, t_logprobs, t_logits, h, attn
+
+                                    layer_loss = loss_sum / denom.clamp_min(1.0)
+
                                 else:
-                                    out = lens(h, layer=lid, labels=labels, attention_mask=attn, return_logits=False, return_loss=True)
+                                    out = lens(
+                                        h_full,
+                                        layer=lid,
+                                        labels=labels_full,
+                                        attention_mask=attn_full,
+                                        return_logits=False,
+                                        return_loss=True,
+                                    )
                                     if out.loss is None:
                                         raise RuntimeError("Lens.forward did not return loss.")
                                     layer_loss = out.loss
@@ -376,9 +422,9 @@ class Train:
                             else:
                                 layer_loss.backward()
 
-                        del out, layer_loss
+                        del layer_loss
 
-                del outputs, hidden_states, per_layer_acts, acts, teacher_logits, teacher_logprobs
+                del acts, teacher_logits_full, attn_full, labels_full
 
                 if target_tokens is None:
                     break
@@ -403,7 +449,7 @@ class Train:
 
             if ddp_state.device.type == "cuda":
                 torch.cuda.synchronize(ddp_state.device)
-            dt = time.perf_counter() - t0
+            dt = time.perf_counter() - t_step0
 
             total_tokens_seen += int(accum_global_tokens)
 
@@ -418,20 +464,13 @@ class Train:
 
             if ddp_state.is_main and self.log_every and (step == 1 or step % self.log_every == 0 or step == self.num_steps):
                 lr = optimizer.param_groups[0]["lr"]
-                diag_str = ""
-                if diag:
-                    diag_str = (
-                        f" | pack:bs={diag['bsz']} seq={diag['seq']} "
-                        f"min={diag['min_len']} max={diag['max_len']} mean={diag['mean_len']:.1f} "
-                        f"pad={diag['pad_frac']*100:.1f}%"
-                    )
                 if n2b is not None:
                     logger.info(
                         f"[Train] step {step}/{self.num_steps} "
                         f"loss={reported.item():.4f} (bits/byte) mean_nats={mean_loss_global.item():.4f} "
                         f"tok/s={tok_per_s:.0f} dt={dt*1000:.1f}ms "
                         f"tokens={total_tokens_seen} micro={microsteps} toks_step={int(accum_global_tokens)} "
-                        f"lr={lr:.2e}{mem_lines}{diag_str}"
+                        f"lr={lr:.2e}{mem_lines}"
                     )
                 else:
                     logger.info(
@@ -439,7 +478,7 @@ class Train:
                         f"loss={mean_loss_global.item():.4f} (nats/token) "
                         f"tok/s={tok_per_s:.0f} dt={dt*1000:.1f}ms "
                         f"tokens={total_tokens_seen} micro={microsteps} toks_step={int(accum_global_tokens)} "
-                        f"lr={lr:.2e}{mem_lines}{diag_str}"
+                        f"lr={lr:.2e}{mem_lines}"
                     )
 
             if ddp_state.is_main and (step % self.save_every == 0 or step == self.num_steps):
@@ -483,6 +522,7 @@ class Train:
                 "amp": self.amp,
                 "amp_dtype": self.amp_dtype,
                 "tokens_per_step": self.tokens_per_step,
+                "kl_t_chunk": self.kl_t_chunk,
             },
             "tokenizer_name_or_path": getattr(tokenizer, "name_or_path", None),
             "layer_ids": layer_ids,

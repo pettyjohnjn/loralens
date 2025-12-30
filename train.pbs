@@ -18,6 +18,7 @@ conda activate LoRA_Lens
 # export TORCH_DISTRIBUTED_DEBUG=DETAIL
 # export NCCL_DEBUG=INFO
 export TOKENIZERS_PARALLELISM=false
+source ~/.hf_env # export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 # Run from src so `-m loralens.training.train_lens` resolves cleanly
 cd src
