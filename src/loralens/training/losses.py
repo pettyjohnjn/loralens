@@ -21,7 +21,7 @@ def masked_kl_logtarget(
         to avoid creating large fp32 intermediates.
     """
     # [B,T,V] in autocast dtype (bf16/fp16)
-    s_logprobs = F.log_softmax(student_logits, dim=-1)
+    s_logprobs = F.log_softmax(student_logits, dim=-1, dtype=student_logits.dtype)
     t_logprobs = teacher_logprobs
 
     # [B,T,V] in autocast dtype

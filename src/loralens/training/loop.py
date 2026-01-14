@@ -116,7 +116,6 @@ class Train:
                 raise ValueError(f"Unknown loss={self.loss!r}; expected 'kl' or 'ce'.")
 
         if self.token_shift is None:
-            # KL compares same-position distributions; CE is next-token
             self.token_shift = 0 if self.loss == LossChoice.KL else 1
 
         ddp_state = init_ddp(backend=self.ddp_backend, enabled=self.ddp)
@@ -313,25 +312,41 @@ class Train:
                             return_dict=False,
                         )
 
-                # return_dict=False: (logits, hidden_states) for GPT-like CausalLM
-                teacher_logits_full = model_out[0]  # [B, T, V] bf16/fp16
+                teacher_logits_full = model_out[0]  # [B, T, V] autocast dtype
                 hidden_states = model_out[1]
                 per_layer_acts = hidden_states[1:]  # drop embeddings
 
                 shift = max(int(self.token_shift or 0), 0)
                 if shift > 0:
-                    attn_full = attention_mask[:, shift:].contiguous()
-                    acts = [h[:, :-shift, :].contiguous() for h in per_layer_acts]
-                    teacher_logits_full = teacher_logits_full[:, shift:, :].contiguous()
-                    labels_full = input_ids[:, shift:].contiguous()
+                    attn_full = attention_mask[:, shift:]
+                    labels_full = input_ids[:, shift:]
+                    teacher_logits_full = teacher_logits_full[:, shift:, :]
                 else:
                     attn_full = attention_mask
-                    acts = [h.contiguous() for h in per_layer_acts]
                     labels_full = input_ids
 
-                del model_out, hidden_states, per_layer_acts
+                # Chunk slices along T
+                T_eff = int(attn_full.size(1))
+                t_chunk = int(self.kl_t_chunk) if (self.loss == LossChoice.KL) else 0
+                if t_chunk <= 0 or t_chunk >= T_eff:
+                    t_slices = [(0, T_eff)]
+                else:
+                    t_slices = [(t0, min(t0 + t_chunk, T_eff)) for t0 in range(0, T_eff, t_chunk)]
 
-                n_layers = len(acts)
+                # Change 1+2: convert teacher logits -> teacher logprobs IN-PLACE (chunked over T),
+                # so we do not allocate an extra [B,T,V] buffer.
+                if self.loss == LossChoice.KL:
+                    with torch.no_grad():
+                        for t0, t1 in t_slices:
+                            tl = teacher_logits_full[:, t0:t1, :]
+                            # log_softmax creates an output; copy back into the same slice to avoid a full buffer.
+                            teacher_logits_full[:, t0:t1, :].copy_(torch.log_softmax(tl, dim=-1))
+                            del tl
+
+                # Free big containers early; keep only tensor refs we still need.
+                del model_out, hidden_states
+
+                n_layers = len(per_layer_acts)
                 inv_layers = 1.0 / float(n_layers)
                 scale = (tokens_this_micro / float(target_tokens)) if target_tokens is not None else 1.0
 
@@ -342,15 +357,8 @@ class Train:
                 )
                 micro_ctx = lens.no_sync() if (is_ddp and not micro_sync) else nullcontext()
 
-                T_eff = int(attn_full.size(1))
-                t_chunk = int(self.kl_t_chunk) if (self.loss == LossChoice.KL) else 0
-                if t_chunk <= 0 or t_chunk >= T_eff:
-                    t_slices = [(0, T_eff)]
-                else:
-                    t_slices = [(t0, min(t0 + t_chunk, T_eff)) for t0 in range(0, T_eff, t_chunk)]
-
                 with micro_ctx:
-                    for li, (lid, h_full) in enumerate(zip(layer_ids, acts)):
+                    for li, (lid, h_full_raw) in enumerate(zip(layer_ids, per_layer_acts)):
                         if is_ddp and micro_sync:
                             layer_ctx = lens.no_sync() if (li != n_layers - 1) else nullcontext()
                         else:
@@ -359,13 +367,18 @@ class Train:
                         with layer_ctx:
                             with autocast_ctx(ddp_state.device, self.amp, self.amp_dtype):
                                 if self.loss == LossChoice.KL:
-                                    # accumulate exact mean KL across T chunks for this layer
                                     loss_sum = torch.zeros((), device=ddp_state.device, dtype=torch.float32)
                                     denom = torch.zeros((), device=ddp_state.device, dtype=torch.float32)
 
+                                    # Change 3: do NOT make per-layer hidden states contiguous/copies globally.
+                                    # Only slice+contiguous per-chunk.
+                                    if shift > 0:
+                                        h_full = h_full_raw[:, :-shift, :]
+                                    else:
+                                        h_full = h_full_raw
+
                                     for t0, t1 in t_slices:
                                         attn = attn_full[:, t0:t1].contiguous()
-                                        # cheap early skip on all-pad chunks
                                         if attn.sum().item() == 0:
                                             continue
 
@@ -382,11 +395,8 @@ class Train:
                                         if out.logits is None:
                                             raise RuntimeError("Lens.forward did not return logits.")
 
-                                        # Teacher logprobs for this chunk in autocast dtype (bf16/fp16)
-                                        # No explicit fp32 materialization of [B,t,V]
-                                        with torch.no_grad():
-                                            t_logits = teacher_logits_full[:, t0:t1, :].contiguous()
-                                            t_logprobs = torch.log_softmax(t_logits, dim=-1).contiguous()
+                                        # teacher_logits_full now holds TEACHER LOGPROBS (same dtype, no extra buffer)
+                                        t_logprobs = teacher_logits_full[:, t0:t1, :].contiguous()
 
                                         chunk_sum = masked_kl_logtarget(
                                             student_logits=out.logits,
@@ -397,22 +407,30 @@ class Train:
                                         loss_sum = loss_sum + chunk_sum
                                         denom = denom + attn.sum(dtype=torch.float32)
 
-                                        del out, chunk_sum, t_logprobs, t_logits, h, attn
+                                        del out, chunk_sum, t_logprobs, h, attn
 
                                     layer_loss = loss_sum / denom.clamp_min(1.0)
+                                    del h_full
 
                                 else:
+                                    # CE path unchanged (still uses lens-provided loss)
+                                    if shift > 0:
+                                        h_use = h_full_raw[:, :-shift, :].contiguous()
+                                    else:
+                                        h_use = h_full_raw.contiguous()
+
                                     out = lens(
-                                        h_full,
+                                        h_use,
                                         layer=lid,
-                                        labels=labels_full,
-                                        attention_mask=attn_full,
+                                        labels=labels_full.contiguous(),
+                                        attention_mask=attn_full.contiguous(),
                                         return_logits=False,
                                         return_loss=True,
                                     )
                                     if out.loss is None:
                                         raise RuntimeError("Lens.forward did not return loss.")
                                     layer_loss = out.loss
+                                    del out, h_use
 
                                 layer_loss = layer_loss * inv_layers * scale
                                 accum_loss_local = accum_loss_local + layer_loss.detach().float()
@@ -424,7 +442,8 @@ class Train:
 
                         del layer_loss
 
-                del acts, teacher_logits_full, attn_full, labels_full
+                # teacher_logits_full is actually teacher_logprobs now
+                del per_layer_acts, teacher_logits_full, attn_full, labels_full, input_ids, attention_mask
 
                 if target_tokens is None:
                     break
