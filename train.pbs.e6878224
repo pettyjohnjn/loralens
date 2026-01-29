@@ -1,0 +1,58 @@
+
+Lmod is automatically replacing "nvidia/25.5" with "gcc-native/14".
+
+
+Lmod is automatically replacing "PrgEnv-nvidia/8.6.0" with "PrgEnv-gnu/8.6.0".
+
+
+Due to MODULEPATH changes, the following have been reloaded:
+  1) cray-mpich/9.0.1
+
+master_addr is only used for static rdzv_backend and when rdzv_endpoint is not specified.
+indexed_logits CUDA extension not available. Falling back to standard implementation. Install with: pip install git+https://github.com/pettyjohnjn/indexed_logits.git
+indexed_logits CUDA extension not available. Falling back to standard implementation. Install with: pip install git+https://github.com/pettyjohnjn/indexed_logits.git
+indexed_logits CUDA extension not available. Falling back to standard implementation. Install with: pip install git+https://github.com/pettyjohnjn/indexed_logits.git
+indexed_logits CUDA extension not available. Falling back to standard implementation. Install with: pip install git+https://github.com/pettyjohnjn/indexed_logits.git
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+[INFO] Added key: store_based_barrier_key:1 to store for rank: 3
+[INFO] Added key: store_based_barrier_key:1 to store for rank: 1
+[INFO] Added key: store_based_barrier_key:1 to store for rank: 2
+[INFO] Added key: store_based_barrier_key:1 to store for rank: 0
+[INFO] Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 4 nodes.
+[INFO] Rank 3: Completed store-based barrier for key:store_based_barrier_key:1 with 4 nodes.
+[INFO] Rank 1: Completed store-based barrier for key:store_based_barrier_key:1 with 4 nodes.
+[INFO] Rank 2: Completed store-based barrier for key:store_based_barrier_key:1 with 4 nodes.
+[INFO] Config: TrainConfig(model_name='gpt2', model_revision=None, tokenizer_name=None, data_source='pile', text_paths=[], text_mode='lines', text_json_field='text', pile_split='train', max_seq_len=1024, stride=1024, drop_remainder=True, document_separated=True, max_docs=None, lens_type='lora', lora_rank=16, lora_alpha=1.0, loss_type='subset_kl', kl_chunk_size=128, subset_kl_k=128, shared_subset_top_m=16, shared_subset_max_K=512, token_shift=0, per_gpu_batch_size=20, num_steps=1024, lr=0.001, weight_decay=0.0, warmup_steps=0, grad_clip_norm=1.0, tokens_per_step=262144, max_microsteps=512, amp_enabled=True, amp_dtype='bf16', ddp_enabled=True, ddp_backend='nccl', log_every=1, log_memory=True, save_every=512, output_dir=PosixPath('checkpoints'), seed=0)
+[INFO] DDP: DDPState(enabled=True, rank=0, world_size=4, device=cuda:0)
+[INFO] Loading model: gpt2
+[INFO] Lens: LoRALens(vocab_size=50257, r=16, layers=12, params=304,128/38,903,040)
+[INFO] Loss: SubsetKLLoss(k=128, reduction='mean')
+Token indices sequence length is longer than the specified maximum sequence length for this model (3741 > 1024). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (1499 > 1024). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (2622 > 1024). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (8786 > 1024). Running this sequence through the model will result in indexing errors
+[INFO] step 1/1024 | loss=4.5365 | tok/s=41093 | dt=7974ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 2/1024 | loss=4.3420 | tok/s=80782 | dt=4056ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 3/1024 | loss=4.5918 | tok/s=80252 | dt=4083ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 4/1024 | loss=4.5578 | tok/s=77883 | dt=4207ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 5/1024 | loss=4.2307 | tok/s=79895 | dt=4101ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 6/1024 | loss=4.1783 | tok/s=76352 | dt=4292ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 7/1024 | loss=4.1669 | tok/s=77266 | dt=4241ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 8/1024 | loss=4.3408 | tok/s=80751 | dt=4058ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 9/1024 | loss=4.3206 | tok/s=79831 | dt=4105ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 10/1024 | loss=4.2830 | tok/s=79587 | dt=4117ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 11/1024 | loss=3.6943 | tok/s=80152 | dt=4088ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 12/1024 | loss=3.9609 | tok/s=80472 | dt=4072ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 13/1024 | loss=4.3190 | tok/s=76422 | dt=4288ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 14/1024 | loss=4.3209 | tok/s=74528 | dt=4397ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 15/1024 | loss=4.3677 | tok/s=80077 | dt=4092ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 16/1024 | loss=4.4560 | tok/s=81009 | dt=4045ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+WARNING:torch.distributed.elastic.agent.server.api:Received 15 death signal, shutting down workers
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 1304010 closing signal SIGTERM

@@ -1,0 +1,90 @@
+#!/bin/bash
+#PBS -l select=2:ngpus=4
+#PBS -l walltime=12:00:00
+#PBS -q preemptable
+#PBS -l filesystems=home:grand:eagle
+#PBS -A SuperBERT
+#PBS -N loralens_llama
+
+# ============================================================
+# LoRA Lens Training for Large Models (e.g., Llama-2-7B)
+# Multi-node with subset KL for memory efficiency
+# ============================================================
+
+cd /lus/grand/projects/SuperBERT/pettyjohnjn/loralens
+
+module use /soft/modulefiles
+module load conda
+conda activate LoRA_Lens
+
+export TOKENIZERS_PARALLELISM=false
+source ~/.hf_env
+
+# Multi-node setup
+NNODES=$(cat $PBS_NODEFILE | sort | uniq | wc -l)
+NGPUS_PER_NODE=4
+MASTER_ADDR=$(head -1 $PBS_NODEFILE)
+MASTER_PORT=29500
+
+echo "Running on ${NNODES} nodes"
+echo "Master: ${MASTER_ADDR}:${MASTER_PORT}"
+
+# ============================================================
+# Configuration - Large Model
+# ============================================================
+
+MODEL_NAME="meta-llama/Llama-2-7b-hf"
+LENS_TYPE="lora"
+LOSS_TYPE="subset_kl"
+
+# LoRA rank - higher for larger models
+LORA_RANK=32
+
+# Subset KL - essential for 32k vocab
+SUBSET_KL_HEAD_K=200
+SUBSET_KL_TAIL_K=100
+
+NUM_STEPS=2000
+BATCH_SIZE=2           # Smaller batch for large model
+LR=5e-4
+WARMUP_STEPS=200
+TOKENS_PER_STEP=262144
+
+MAX_SEQ_LEN=1024
+DATA_SOURCE="pile"
+
+OUTPUT_DIR="./checkpoints/llama2_7b_lora_r${LORA_RANK}"
+
+# ============================================================
+# Run Training (Multi-node)
+# ============================================================
+
+cd src
+
+torchrun \
+    --nnodes=${NNODES} \
+    --nproc_per_node=${NGPUS_PER_NODE} \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
+    -m loralens.cli.main train \
+    --model_name ${MODEL_NAME} \
+    --data_source ${DATA_SOURCE} \
+    --lens_type ${LENS_TYPE} \
+    --lora_rank ${LORA_RANK} \
+    --loss_type ${LOSS_TYPE} \
+    --subset_kl_head_k ${SUBSET_KL_HEAD_K} \
+    --subset_kl_tail_k ${SUBSET_KL_TAIL_K} \
+    --max_seq_len ${MAX_SEQ_LEN} \
+    --batch_size ${BATCH_SIZE} \
+    --num_steps ${NUM_STEPS} \
+    --lr ${LR} \
+    --warmup_steps ${WARMUP_STEPS} \
+    --tokens_per_step ${TOKENS_PER_STEP} \
+    --amp \
+    --amp_dtype bf16 \
+    --log_every 10 \
+    --save_every 500 \
+    --output_dir ${OUTPUT_DIR} \
+    --seed 42
+
+echo "Training complete. Checkpoints saved to ${OUTPUT_DIR}"

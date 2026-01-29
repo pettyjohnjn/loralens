@@ -1,0 +1,117 @@
+
+Lmod is automatically replacing "nvidia/25.5" with "gcc-native/14".
+
+
+Lmod is automatically replacing "PrgEnv-nvidia/8.6.0" with "PrgEnv-gnu/8.6.0".
+
+
+Due to MODULEPATH changes, the following have been reloaded:
+  1) cray-mpich/9.0.1
+
+master_addr is only used for static rdzv_backend and when rdzv_endpoint is not specified.
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+Traceback (most recent call last):
+Traceback (most recent call last):
+Traceback (most recent call last):
+  File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+  File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+  File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+Traceback (most recent call last):
+  File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+        return _run_code(code, main_globals, None,    return _run_code(code, main_globals, None,
+return _run_code(code, main_globals, None,
+  File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py", line 86, in _run_code
+
+      File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py", line 86, in _run_code
+  File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py", line 86, in _run_code
+return _run_code(code, main_globals, None,
+      File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py", line 86, in _run_code
+exec(code, run_globals)
+      File "/lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored/src/loralens/cli/main.py", line 297, in <module>
+    exec(code, run_globals)exec(code, run_globals)    
+
+exec(code, run_globals)  File "/lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored/src/loralens/cli/main.py", line 297, in <module>
+  File "/lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored/src/loralens/cli/main.py", line 297, in <module>
+
+  File "/lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored/src/loralens/cli/main.py", line 297, in <module>
+    main()
+  File "/lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored/src/loralens/cli/main.py", line 291, in main
+        main()main()
+
+  File "/lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored/src/loralens/cli/main.py", line 291, in main
+      File "/lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored/src/loralens/cli/main.py", line 291, in main
+    main()train(args)
+
+  File "/lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored/src/loralens/cli/main.py", line 291, in main
+  File "/lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored/src/loralens/cli/main.py", line 115, in train
+        train(args)train(args)
+
+  File "/lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored/src/loralens/cli/main.py", line 115, in train
+      File "/lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored/src/loralens/cli/main.py", line 115, in train
+    subset_kl_head_k=args.subset_kl_head_k,train(args)
+    
+AttributeError    subset_kl_head_k=args.subset_kl_head_k,  File "/lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored/src/loralens/cli/main.py", line 115, in train
+: subset_kl_head_k=args.subset_kl_head_k,
+'Namespace' object has no attribute 'subset_kl_head_k'
+AttributeErrorAttributeError. Did you mean: ':     : subset_kl_k'Namespace' object has no attribute 'subset_kl_head_k'subset_kl_head_k=args.subset_kl_head_k,'Namespace' object has no attribute 'subset_kl_head_k''?
+. Did you mean: '
+. Did you mean: 'AttributeErrorsubset_kl_ksubset_kl_k: '?'?'Namespace' object has no attribute 'subset_kl_head_k'
+
+. Did you mean: 'subset_kl_k'?
+ERROR:torch.distributed.elastic.multiprocessing.api:failed (exitcode: 1) local_rank: 0 (pid: 610637) of binary: /home/pettyjohnjn/.conda/envs/LoRA_Lens/bin/python3.10
+Traceback (most recent call last):
+  File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/bin/torchrun", line 8, in <module>
+    sys.exit(main())
+  File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/site-packages/torch/distributed/run.py", line 794, in main
+    run(args)
+  File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/site-packages/torch/distributed/run.py", line 785, in run
+    elastic_launch(
+  File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 134, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 250, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+loralens.cli.main FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-01-27_21:29:53
+  host      : x3006c0s13b0n0.hsn.cm.polaris.alcf.anl.gov
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 610638)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[2]:
+  time      : 2026-01-27_21:29:53
+  host      : x3006c0s13b0n0.hsn.cm.polaris.alcf.anl.gov
+  rank      : 2 (local_rank: 2)
+  exitcode  : 1 (pid: 610639)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[3]:
+  time      : 2026-01-27_21:29:53
+  host      : x3006c0s13b0n0.hsn.cm.polaris.alcf.anl.gov
+  rank      : 3 (local_rank: 3)
+  exitcode  : 1 (pid: 610640)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-01-27_21:29:53
+  host      : x3006c0s13b0n0.hsn.cm.polaris.alcf.anl.gov
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 610637)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================

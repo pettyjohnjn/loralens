@@ -1,0 +1,107 @@
+
+Lmod is automatically replacing "nvidia/25.5" with "gcc-native/14".
+
+
+Lmod is automatically replacing "PrgEnv-nvidia/8.6.0" with "PrgEnv-gnu/8.6.0".
+
+
+Due to MODULEPATH changes, the following have been reloaded:
+  1) cray-mpich/9.0.1
+
+master_addr is only used for static rdzv_backend and when rdzv_endpoint is not specified.
+indexed_logits CUDA extension not available. Falling back to standard implementation. Install with: pip install git+https://github.com/pettyjohnjn/indexed_logits.git
+indexed_logits CUDA extension not available. Falling back to standard implementation. Install with: pip install git+https://github.com/pettyjohnjn/indexed_logits.git
+indexed_logits CUDA extension not available. Falling back to standard implementation. Install with: pip install git+https://github.com/pettyjohnjn/indexed_logits.git
+indexed_logits CUDA extension not available. Falling back to standard implementation. Install with: pip install git+https://github.com/pettyjohnjn/indexed_logits.git
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+[INFO] Added key: store_based_barrier_key:1 to store for rank: 3
+[INFO] Added key: store_based_barrier_key:1 to store for rank: 2
+[INFO] Added key: store_based_barrier_key:1 to store for rank: 1
+[INFO] Added key: store_based_barrier_key:1 to store for rank: 0
+[INFO] Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 4 nodes.
+[INFO] Rank 3: Completed store-based barrier for key:store_based_barrier_key:1 with 4 nodes.
+[INFO] Rank 1: Completed store-based barrier for key:store_based_barrier_key:1 with 4 nodes.
+[INFO] Rank 2: Completed store-based barrier for key:store_based_barrier_key:1 with 4 nodes.
+[INFO] Config: TrainConfig(model_name='gpt2', model_revision=None, tokenizer_name=None, data_source='pile', text_paths=[], text_mode='lines', text_json_field='text', pile_split='train', max_seq_len=1024, stride=1024, drop_remainder=True, document_separated=True, max_docs=None, lens_type='lora', lora_rank=16, lora_alpha=1.0, loss_type='subset_kl', kl_chunk_size=128, subset_kl_k=128, shared_subset_top_m=16, shared_subset_max_K=512, token_shift=0, per_gpu_batch_size=20, num_steps=1024, lr=0.001, weight_decay=0.0, warmup_steps=0, grad_clip_norm=1.0, tokens_per_step=262144, max_microsteps=512, amp_enabled=True, amp_dtype='bf16', ddp_enabled=True, ddp_backend='nccl', log_every=1, log_memory=True, save_every=512, output_dir=PosixPath('checkpoints'), seed=0)
+[INFO] DDP: DDPState(enabled=True, rank=0, world_size=4, device=cuda:0)
+[INFO] Loading model: gpt2
+[INFO] Lens: LoRALens(vocab_size=50257, r=16, layers=12, params=304,128/38,903,040)
+[INFO] Loss: SubsetKLLoss(k=128, reduction='mean')
+Token indices sequence length is longer than the specified maximum sequence length for this model (1042 > 1024). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (2710 > 1024). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (43082 > 1024). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (7497 > 1024). Running this sequence through the model will result in indexing errors
+[INFO] step 1/1024 | loss=4.5237 | tok/s=35942 | dt=9117ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 2/1024 | loss=4.3810 | tok/s=81526 | dt=4019ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 3/1024 | loss=4.1150 | tok/s=79860 | dt=4103ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 4/1024 | loss=3.6941 | tok/s=79509 | dt=4121ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 5/1024 | loss=4.4240 | tok/s=80588 | dt=4066ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 6/1024 | loss=4.4051 | tok/s=78311 | dt=4184ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 7/1024 | loss=4.3427 | tok/s=80648 | dt=4063ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 8/1024 | loss=4.4930 | tok/s=79995 | dt=4096ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 9/1024 | loss=4.4135 | tok/s=80481 | dt=4071ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 10/1024 | loss=4.2674 | tok/s=79202 | dt=4137ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 11/1024 | loss=4.2280 | tok/s=75106 | dt=4363ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 12/1024 | loss=4.2682 | tok/s=80308 | dt=4080ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 13/1024 | loss=4.0708 | tok/s=74728 | dt=4385ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 14/1024 | loss=3.9483 | tok/s=79800 | dt=4106ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 15/1024 | loss=4.1361 | tok/s=79457 | dt=4124ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 16/1024 | loss=4.4463 | tok/s=80341 | dt=4079ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 17/1024 | loss=4.1214 | tok/s=80277 | dt=4082ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 18/1024 | loss=3.7448 | tok/s=79733 | dt=4110ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 19/1024 | loss=3.3825 | tok/s=80668 | dt=4062ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 20/1024 | loss=4.2460 | tok/s=75068 | dt=4365ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 21/1024 | loss=3.9961 | tok/s=79860 | dt=4103ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 22/1024 | loss=4.0409 | tok/s=79888 | dt=4102ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 23/1024 | loss=4.1836 | tok/s=80764 | dt=4057ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 24/1024 | loss=4.0119 | tok/s=74819 | dt=4380ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 25/1024 | loss=3.9011 | tok/s=80355 | dt=4078ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 26/1024 | loss=4.0787 | tok/s=80428 | dt=4074ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 27/1024 | loss=3.8398 | tok/s=80096 | dt=4091ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 28/1024 | loss=4.0557 | tok/s=80178 | dt=4087ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 29/1024 | loss=4.1239 | tok/s=79545 | dt=4119ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 30/1024 | loss=4.1176 | tok/s=78960 | dt=4150ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 31/1024 | loss=3.5624 | tok/s=79479 | dt=4123ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 32/1024 | loss=3.1887 | tok/s=80585 | dt=4066ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 33/1024 | loss=4.1523 | tok/s=80052 | dt=4093ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 34/1024 | loss=3.9796 | tok/s=77684 | dt=4218ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 35/1024 | loss=4.3202 | tok/s=79279 | dt=4133ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 36/1024 | loss=3.9433 | tok/s=79841 | dt=4104ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 37/1024 | loss=3.8317 | tok/s=73747 | dt=4443ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 38/1024 | loss=3.6793 | tok/s=74881 | dt=4376ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 39/1024 | loss=3.2870 | tok/s=79917 | dt=4100ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 40/1024 | loss=3.7346 | tok/s=74580 | dt=4394ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 41/1024 | loss=4.0053 | tok/s=78226 | dt=4189ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 42/1024 | loss=4.1200 | tok/s=79368 | dt=4129ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 43/1024 | loss=3.8770 | tok/s=71946 | dt=4555ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 44/1024 | loss=3.3759 | tok/s=77698 | dt=4217ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 45/1024 | loss=3.8498 | tok/s=80624 | dt=4064ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 46/1024 | loss=3.4712 | tok/s=80117 | dt=4090ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 47/1024 | loss=3.9056 | tok/s=79936 | dt=4099ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 48/1024 | loss=3.5999 | tok/s=79704 | dt=4111ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 49/1024 | loss=3.2481 | tok/s=79346 | dt=4130ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 50/1024 | loss=3.6316 | tok/s=79428 | dt=4125ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 51/1024 | loss=3.5128 | tok/s=80138 | dt=4089ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 52/1024 | loss=3.4008 | tok/s=75109 | dt=4363ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 53/1024 | loss=3.7300 | tok/s=80936 | dt=4049ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 54/1024 | loss=3.6299 | tok/s=80258 | dt=4083ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 55/1024 | loss=3.7423 | tok/s=79912 | dt=4101ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 56/1024 | loss=3.6931 | tok/s=80380 | dt=4077ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 57/1024 | loss=3.6215 | tok/s=80292 | dt=4081ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 58/1024 | loss=3.4231 | tok/s=80925 | dt=4049ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 59/1024 | loss=3.5528 | tok/s=79849 | dt=4104ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 60/1024 | loss=3.3034 | tok/s=80466 | dt=4072ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+[INFO] step 61/1024 | loss=3.6102 | tok/s=80932 | dt=4049ms | micro=4 | lr=1.00e-03 | mem=10.7GB
+=>> PBS: job killed: walltime 309 exceeded limit 300
+WARNING:torch.distributed.elastic.agent.server.api:Received 15 death signal, shutting down workers
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 1325320 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 1325321 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 1325322 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 1325323 closing signal SIGTERM

@@ -1,0 +1,70 @@
+#!/bin/bash
+#PBS -l select=1
+#PBS -l walltime=00:05:00
+#PBS -q debug
+#PBS -l filesystems=home:grand:eagle
+#PBS -A SuperBERT
+
+# ============================================================
+# Tuned Lens Baseline - Apples-to-apples comparison
+# Full-rank translators, full KL divergence, same as original
+# ============================================================
+
+cd /lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored
+
+module use /soft/modulefiles
+module load conda
+conda activate LoRA_Lens
+
+export TOKENIZERS_PARALLELISM=false
+source ~/.hf_env
+
+# ============================================================
+# Configuration - Matches original tuned-lens settings
+# ============================================================
+
+MODEL_NAME="gpt2"
+LENS_TYPE="tuned"           # Full-rank translators (not LoRA)
+LOSS_TYPE="kl"              # Full KL divergence (not subset)
+
+NUM_STEPS=1000
+BATCH_SIZE=20               # Same as original
+LR=1e-3
+WARMUP_STEPS=100
+TOKENS_PER_STEP=262144      # ~2^18 global tokens per step
+
+MAX_SEQ_LEN=1024
+DATA_SOURCE="pile"
+
+OUTPUT_DIR="./checkpoints/tuned_lens_baseline"
+
+# ============================================================
+# Run Training
+# ============================================================
+
+cd src
+
+torchrun \
+    --standalone \
+    --nnodes=1 \
+    --nproc_per_node=4 \
+    -m loralens.cli.main train \
+    --model_name ${MODEL_NAME} \
+    --data_source ${DATA_SOURCE} \
+    --lens_type ${LENS_TYPE} \
+    --loss_type ${LOSS_TYPE} \
+    --kl_chunk_size 128 \
+    --max_seq_len ${MAX_SEQ_LEN} \
+    --batch_size ${BATCH_SIZE} \
+    --num_steps ${NUM_STEPS} \
+    --lr ${LR} \
+    --warmup_steps ${WARMUP_STEPS} \
+    --tokens_per_step ${TOKENS_PER_STEP} \
+    --amp \
+    --amp_dtype bf16 \
+    --log_every 1 \
+    --save_every 500 \
+    --output_dir ${OUTPUT_DIR} \
+    --seed 0
+
+echo "Training complete. Checkpoints saved to ${OUTPUT_DIR}"

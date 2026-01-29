@@ -1,0 +1,56 @@
+
+Lmod is automatically replacing "nvidia/25.5" with "gcc-native/14".
+
+
+Lmod is automatically replacing "PrgEnv-nvidia/8.6.0" with "PrgEnv-gnu/8.6.0".
+
+
+Due to MODULEPATH changes, the following have been reloaded:
+  1) cray-mpich/9.0.1
+
+master_addr is only used for static rdzv_backend and when rdzv_endpoint is not specified.
+indexed_logits CUDA extension not available. Falling back to standard implementation. Install with: pip install git+https://github.com/pettyjohnjn/indexed_logits.git
+indexed_logits CUDA extension not available. Falling back to standard implementation. Install with: pip install git+https://github.com/pettyjohnjn/indexed_logits.git
+indexed_logits CUDA extension not available. Falling back to standard implementation. Install with: pip install git+https://github.com/pettyjohnjn/indexed_logits.git
+indexed_logits CUDA extension not available. Falling back to standard implementation. Install with: pip install git+https://github.com/pettyjohnjn/indexed_logits.git
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+/home/pettyjohnjn/.conda/envs/LoRA_Lens/lib/python3.10/runpy.py:126: RuntimeWarning: 'loralens.cli.main' found in sys.modules after import of package 'loralens.cli', but prior to execution of 'loralens.cli.main'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+[INFO] Added key: store_based_barrier_key:1 to store for rank: 3
+[INFO] Added key: store_based_barrier_key:1 to store for rank: 1
+[INFO] Added key: store_based_barrier_key:1 to store for rank: 2
+[INFO] Added key: store_based_barrier_key:1 to store for rank: 0
+[INFO] Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 4 nodes.
+[INFO] Rank 3: Completed store-based barrier for key:store_based_barrier_key:1 with 4 nodes.
+[INFO] Rank 1: Completed store-based barrier for key:store_based_barrier_key:1 with 4 nodes.
+[INFO] Rank 2: Completed store-based barrier for key:store_based_barrier_key:1 with 4 nodes.
+[INFO] Config: TrainConfig(model_name='gpt2', model_revision=None, tokenizer_name=None, data_source='pile', text_paths=[], text_mode='lines', text_json_field='text', pile_split='train', max_seq_len=1024, stride=1024, drop_remainder=True, document_separated=True, max_docs=None, lens_type='lora', lora_rank=16, lora_alpha=1.0, loss_type='subset_kl', kl_chunk_size=128, subset_kl_k=128, subset_kl_tail=0, subset_kl_tail_clip=50.0, shared_subset_top_m=16, shared_subset_max_K=512, token_shift=0, checkpoint_activations=True, checkpoint_every=4, per_gpu_batch_size=20, num_steps=1024, lr=0.001, weight_decay=0.0, warmup_steps=0, grad_clip_norm=1.0, tokens_per_step=262144, max_microsteps=512, amp_enabled=True, amp_dtype='bf16', ddp_enabled=True, ddp_backend='nccl', log_every=1, log_memory=True, save_every=512, output_dir=PosixPath('checkpoints'), seed=0)
+[INFO] DDP: DDPState(enabled=True, rank=0, world_size=4, device=cuda:0)
+[INFO] Loading model: gpt2
+[INFO] Lens: LoRALens(vocab_size=50257, r=16, layers=12, params=304,128/38,903,040)
+[INFO] Loss: SubsetKLLoss(k=128, reduction='mean')
+[INFO] Gradient checkpointing enabled: storing every 4 layers
+Token indices sequence length is longer than the specified maximum sequence length for this model (2260 > 1024). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (8424 > 1024). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (1499 > 1024). Running this sequence through the model will result in indexing errors
+Token indices sequence length is longer than the specified maximum sequence length for this model (3708 > 1024). Running this sequence through the model will result in indexing errors
+[INFO] step 1/1024 | loss=4.0379 | tok/s=32692 | dt=10023ms | micro=4 | lr=1.00e-03 | mem=13.9GB
+[INFO] step 2/1024 | loss=4.4487 | tok/s=50647 | dt=6470ms | micro=4 | lr=1.00e-03 | mem=13.9GB
+[INFO] step 3/1024 | loss=3.8649 | tok/s=50299 | dt=6515ms | micro=4 | lr=1.00e-03 | mem=13.9GB
+[INFO] step 4/1024 | loss=4.3172 | tok/s=50305 | dt=6514ms | micro=4 | lr=1.00e-03 | mem=13.9GB
+[INFO] step 5/1024 | loss=4.1080 | tok/s=47092 | dt=6958ms | micro=4 | lr=1.00e-03 | mem=13.9GB
+[INFO] step 6/1024 | loss=4.3756 | tok/s=49652 | dt=6600ms | micro=4 | lr=1.00e-03 | mem=13.9GB
+[INFO] step 7/1024 | loss=4.2680 | tok/s=50539 | dt=6484ms | micro=4 | lr=1.00e-03 | mem=13.9GB
+[INFO] step 8/1024 | loss=3.9772 | tok/s=50112 | dt=6539ms | micro=4 | lr=1.00e-03 | mem=13.9GB
+[INFO] step 9/1024 | loss=4.1656 | tok/s=50783 | dt=6452ms | micro=4 | lr=1.00e-03 | mem=13.9GB
+[INFO] step 10/1024 | loss=3.9992 | tok/s=50298 | dt=6515ms | micro=4 | lr=1.00e-03 | mem=13.9GB
+WARNING:torch.distributed.elastic.agent.server.api:Received 15 death signal, shutting down workers
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 1440051 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 1440052 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 1440053 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 1440054 closing signal SIGTERM

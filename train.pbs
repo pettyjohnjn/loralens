@@ -1,0 +1,46 @@
+#!/bin/bash
+#PBS -l select=1
+#PBS -l walltime=00:05:00
+#PBS -q debug
+#PBS -l filesystems=home:grand:eagle
+#PBS -A SuperBERT
+
+# Move to repo root
+cd /lus/grand/projects/SuperBERT/pettyjohnjn/loralens_refactored
+
+# Load modules and activate conda environment
+module use /soft/modulefiles
+module load conda
+conda activate LoRA_Lens
+
+# Environment
+export TOKENIZERS_PARALLELISM=false
+source ~/.hf_env
+
+# Install indexed_logits if not already installed
+pip install git+https://github.com/pettyjohnjn/indexed_logits.git --quiet 2>/dev/null || true
+
+# Run with subset KL
+cd src
+torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=4 \
+  -m loralens.cli.main train \
+  --model_name gpt2 \
+  --data_source pile \
+  --lens_type lora \
+  --lora_rank 16 \
+  --loss_type subset_kl \
+  --subset_kl_k 128 \
+  --max_seq_len 1024 \
+  --batch_size 20 \
+  --num_steps 1024 \
+  --lr 1e-3 \
+  --tokens_per_step 262144 \
+  --kl_chunk_size 128 \
+  --amp \
+  --amp_dtype bf16 \
+  --log_every 1 \
+  --save_every 512 \
+  --output_dir ./checkpoints
