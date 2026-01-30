@@ -11,8 +11,8 @@ This avoids:
 - Full [B, T, V] student logits
 - Per-position weight gathering [B, T, k, d]
 
-The candidate set S is built by taking union of per-position top-m tokens
-from the teacher, pruned to K by aggregated probability mass.
+The candidate set S is built by taking union of per-position importance
+samples from the teacher, pruned to K by aggregated probability mass.
 
 Memory: O(B * chunk_T * K) where K << V (typically K < 1% of V)
 """
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 class SharedSubsetConfig:
     """Configuration for shared subset construction."""
     # Per-position candidates
-    top_m: int = 16  # Top-m teacher tokens per position
+    top_m: int = 16  # Importance-sampled tokens per position
     sample_r: int = 0  # Additional importance-sampled tokens (0 = disabled)
     
     # Shared set size cap
@@ -51,14 +51,14 @@ class SharedSubsetKLLoss(BaseLoss):
     Memory-efficient KL loss using shared candidate vocabulary.
     
     For each sequence+chunk:
-    1. Build candidate set S by union of per-position top-m teacher tokens
+    1. Build candidate set S by union of per-position importance samples
     2. Compute student logits ONLY for S: H @ W[S].T → [chunk_T, K]
     3. Compute position-specific KL on each position's support within S
     
     Parameters
     ----------
     top_m : int
-        Number of top teacher tokens per position to include in candidates.
+        Number of importance-sampled teacher tokens per position to include.
     max_K : int
         Maximum size of shared candidate set (caps memory).
     sample_r : int
@@ -257,23 +257,28 @@ class SharedSubsetKLLoss(BaseLoss):
         """
         T, V = teacher_seq.shape
         top_m = self.config.top_m
+        sample_r = self.config.sample_r
         max_K = self.config.max_K
         
         with torch.no_grad():
-            # Get top-m per position
-            top_vals, top_idx = teacher_seq.topk(k=top_m, dim=-1)  # [T, m]
-            # Renormalize teacher probs over top-m
-            top_probs = F.softmax(top_vals, dim=-1)  # [T, m]
+            # Importance-sample per position from teacher distribution
+            probs = F.softmax(teacher_seq.float(), dim=-1)  # [T, V]
+            m = min(top_m + sample_r, V)
+            if m <= 0:
+                raise ValueError("top_m + sample_r must be > 0 to build candidate set")
+            # Sample without replacement to get unique per-position candidates
+            sampled_idx = torch.multinomial(probs, num_samples=m, replacement=False)  # [T, m]
+            sampled_probs = torch.gather(probs, -1, sampled_idx)  # [T, m]
             
-            # Build union of all top-m tokens
-            all_candidates = top_idx.view(-1).unique()  # Unique token IDs
+            # Build union of all sampled tokens
+            all_candidates = sampled_idx.view(-1).unique()  # Unique token IDs
             
             # If union exceeds max_K, prune by aggregated mass
             if all_candidates.numel() > max_K:
                 # Score = sum of teacher probs where token appears
                 scores = torch.zeros(V, device=device, dtype=torch.float32)
-                flat_idx = top_idx.view(-1)  # [T*m]
-                flat_probs = top_probs.view(-1)  # [T*m]
+                flat_idx = sampled_idx.view(-1)  # [T*m]
+                flat_probs = sampled_probs.view(-1)  # [T*m]
                 scores.scatter_add_(0, flat_idx, flat_probs)
                 
                 # Keep top-K by score
@@ -290,7 +295,7 @@ class SharedSubsetKLLoss(BaseLoss):
             token_to_col[S] = torch.arange(K, device=device)
             
             # Map each position's top-m to columns in S
-            pos_cols_raw = token_to_col[top_idx]  # [T, m], may have -1 for pruned
+            pos_cols_raw = token_to_col[sampled_idx]  # [T, m], may have -1 for pruned
             
             # Create valid mask and handle pruned tokens
             valid_mask = pos_cols_raw >= 0  # [T, m]
@@ -299,7 +304,7 @@ class SharedSubsetKLLoss(BaseLoss):
             pos_cols = pos_cols_raw.clamp(min=0)  # [T, m]
             
             # Zero out probs for pruned tokens and renormalize
-            pos_probs = top_probs * valid_mask.float()  # [T, m]
+            pos_probs = sampled_probs * valid_mask.float()  # [T, m]
             pos_probs = pos_probs / pos_probs.sum(dim=-1, keepdim=True).clamp_min(1e-10)
             
             # Track coverage
