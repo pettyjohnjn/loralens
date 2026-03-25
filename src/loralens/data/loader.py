@@ -134,28 +134,44 @@ class ChunkedTextDataset(IterableDataset):
         tokenizer: PreTrainedTokenizerBase,
         chunk_cfg: ChunkConfig,
         max_docs: Optional[int] = None,
+        rank: int = 0,
+        world_size: int = 1,
     ) -> None:
         super().__init__()
         self.text_source = text_source
         self.tokenizer = tokenizer
         self.chunk_cfg = chunk_cfg
         self.max_docs = max_docs
+        self.rank = rank
+        self.world_size = world_size
+
+        if self.world_size < 1:
+            raise ValueError(f"world_size must be >= 1, got {self.world_size}")
+        if not 0 <= self.rank < self.world_size:
+            raise ValueError(
+                f"rank must be in [0, world_size), got rank={self.rank}, "
+                f"world_size={self.world_size}"
+            )
 
     def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
-        tokenizer = self.tokenizer
         chunk_cfg = self.chunk_cfg
-        seq_len = chunk_cfg.seq_len
-        stride = chunk_cfg.stride or seq_len
 
         if chunk_cfg.document_separated:
             yield from self._iter_document_separated()
         else:
             yield from self._iter_concatenated()
 
+    def _iter_documents(self) -> Iterator[str]:
+        """Shard the document stream across ranks to avoid duplicated training data."""
+        for doc_idx, doc in enumerate(self.text_source):
+            if doc_idx % self.world_size != self.rank:
+                continue
+            yield doc
+
     def _iter_document_separated(self) -> Iterator[Dict[str, torch.Tensor]]:
         """Chunk each document independently."""
         doc_count = 0
-        for doc in self.text_source:
+        for doc in self._iter_documents():
             if self.max_docs is not None and doc_count >= self.max_docs:
                 break
             doc_count += 1
@@ -184,7 +200,7 @@ class ChunkedTextDataset(IterableDataset):
         buffer: List[int] = []
         doc_count = 0
 
-        for doc in self.text_source:
+        for doc in self._iter_documents():
             if self.max_docs is not None and doc_count >= self.max_docs:
                 break
             doc_count += 1
