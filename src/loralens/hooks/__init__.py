@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # src/loralens/hooks/__init__.py
 """
 Hooks module - Activation capture system.
@@ -17,11 +18,24 @@ from hookbox import (
     ActivationCollector,
     CollectedActivations,
 )
+=======
+# hooks/__init__.py
+
+from .base_hook import BaseHook
+from .activation_hook import ActivationHook
+from .hook_manager import HookManager
+from .registry import HookRegistry
+>>>>>>> origin/main
 
 __all__ = [
     "BaseHook",
     "ActivationHook",
     "HookManager",
+<<<<<<< HEAD
     "ActivationCollector",
     "CollectedActivations",
 ]
+=======
+    "HookRegistry",
+]
+>>>>>>> origin/main

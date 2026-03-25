@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -9,3 +10,14 @@ __pycache__/
 
 src/checkpoints/
 logs/
+=======
+**/__pycache__/
+*.pyc
+*.pt
+*.out
+*.e*
+*.o*
+train.pbs.e*
+train.pbs.o*
+loralens_train.*.out
+>>>>>>> origin/main

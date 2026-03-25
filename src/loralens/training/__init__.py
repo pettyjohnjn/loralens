@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # src/loralens/training/__init__.py
 """Training module - orchestrates lens training."""
 
@@ -27,3 +28,8 @@ __all__ = [
     "load_sharded_model_multinode",
     "disabled_shard_state",
 ]
+=======
+from .loop import Train, LossChoice
+
+__all__ = ["Train", "LossChoice"]
+>>>>>>> origin/main
