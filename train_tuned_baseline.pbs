@@ -1,0 +1,48 @@
+#!/bin/bash
+#PBS -l select=1
+#PBS -l walltime=00:60:00
+#PBS -q debug
+#PBS -l filesystems=home:grand:eagle
+#PBS -A SuperBERT
+
+# Tuned Lens baseline: full KL, no LoRA, no subset KL
+
+cd /lus/grand/projects/SuperBERT/pettyjohnjn/loralens-refactored
+
+module use /soft/modulefiles
+module load conda
+conda activate LoRA_Lens
+
+export TOKENIZERS_PARALLELISM=false
+source ~/.hf_env
+
+pip install git+https://github.com/pettyjohnjn/hookbox.git --quiet 2>/dev/null || true
+pip install git+https://github.com/pettyjohnjn/subset-kl.git --quiet 2>/dev/null || true
+pip install git+https://github.com/pettyjohnjn/indexed_logits.git --quiet 2>/dev/null || true
+
+cd src
+
+echo "=== BASELINE: Tuned Lens + Full KL ==="
+torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=4 \
+  -m loralens.cli.main train \
+  --model_name gpt2 \
+  --data_source pile \
+  --lens_type tuned \
+  --loss_type kl \
+  --kl_chunk_size 0 \
+  --max_seq_len 1024 \
+  --batch_size 20 \
+  --warmup_steps 25 \
+  --num_steps 256 \
+  --lr 1e-3 \
+  --tokens_per_step 262144 \
+  --amp \
+  --amp_dtype bf16 \
+  --log_every 1 \
+  --save_every 9999 \
+  --output_dir ./checkpoints/baseline_tuned_kl
+
+echo "=== BASELINE COMPLETE ==="

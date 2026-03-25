@@ -1,0 +1,83 @@
+#!/bin/bash
+#PBS -l select=10
+#PBS -l walltime=00:60:00
+#PBS -q debug-scaling
+#PBS -l filesystems=home:grand:eagle
+#PBS -A SuperBERT
+
+cd /lus/grand/projects/SuperBERT/pettyjohnjn/loralens-refactored
+
+# Figure out training environment
+if [[ -z "${PBS_NODEFILE}" ]]; then
+    RANKS=$HOSTNAME
+    NNODES=1
+else
+    MASTER_RANK=$(head -n 1 $PBS_NODEFILE)
+    echo "Master Rank: "$MASTER_RANK
+    RANKS=$(tr '\n' ' ' < $PBS_NODEFILE)
+    NNODES=$(< $PBS_NODEFILE wc -l)
+fi
+
+echo "NNODES: $NNODES"
+echo "RANKS: $RANKS"
+
+# Commands to run prior to the Python script
+PRELOAD="module use /soft/modulefiles; module load conda; conda activate LoRA_Lens; "
+PRELOAD+="export TOKENIZERS_PARALLELISM=false; "
+PRELOAD+="source ~/.hf_env; "
+PRELOAD+="export OMP_NUM_THREADS=8; "
+PRELOAD+="cd /lus/grand/projects/SuperBERT/pettyjohnjn/loralens-refactored/src; "
+
+# torchrun launch configuration
+LAUNCHER="python -m torch.distributed.run "
+LAUNCHER+="--nnodes=$NNODES --nproc_per_node=4 --max_restarts 0 "
+if [[ "$NNODES" -eq 1 ]]; then
+    LAUNCHER+="--standalone "
+else
+    LAUNCHER+="--master_port=29500 --master_addr=$MASTER_RANK "
+fi
+
+# MODEL_PATH="gpt2"
+# MODEL_PATH="/grand/SuperBERT/aswathy/models/models--meta-llama--Meta-Llama-3-8B-Instruct"
+MODEL_PATH="/lus/grand/projects/SuperBERT/pettyjohnjn/models/Llama-3.3-70B-Instruct"
+
+# Training command
+CMD="-m loralens.cli.main train "
+CMD+="--model_name $MODEL_PATH "
+CMD+="--multinode_model_parallel "
+CMD+="--model_dtype bf16 "
+CMD+="--data_source pile "
+CMD+="--lens_type lora "
+CMD+="--lora_rank 16 "
+CMD+="--loss_type subset_kl "
+CMD+="--subset_kl_k 128 "
+CMD+="--max_seq_len 1024 "
+CMD+="--batch_size 2 "
+CMD+="--num_steps 32 "
+CMD+="--lr 1e-3 "
+CMD+="--tokens_per_step 131072 "
+CMD+="--kl_chunk_size 64 "
+CMD+="--amp "
+CMD+="--amp_dtype bf16 "
+CMD+="--log_every 1 "
+CMD+="--save_every 512 "
+CMD+="--output_dir ./checkpoints "
+
+# Launch on each node
+RANK=0
+for NODE in $RANKS; do
+    NODERANK="--node_rank=$RANK"
+    FULL_CMD="$PRELOAD $LAUNCHER $NODERANK $CMD"
+    echo "Training Command (rank $RANK on $NODE): $FULL_CMD"
+    if [[ "$NODE" == "$HOSTNAME" ]]; then
+        echo "Launching rank $RANK on local node $NODE"
+        eval $FULL_CMD &
+    else
+        echo "Launching rank $RANK on remote node $NODE"
+        ssh $NODE "cd $PWD; $FULL_CMD" &
+    fi
+    RANK=$((RANK+1))
+done
+
+wait
+echo "Done."

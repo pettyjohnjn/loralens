@@ -1,0 +1,62 @@
+#!/bin/bash
+#PBS -l select=6:ngpus=4
+#PBS -l walltime=12:00:00
+#PBS -q prod
+#PBS -l filesystems=home:grand:eagle
+#PBS -A SuperBERT
+#PBS -N loralens_405b
+
+cd /lus/grand/projects/SuperBERT/pettyjohnjn/loralens-refactored
+
+module use /soft/modulefiles
+module load conda
+conda activate LoRA_Lens
+
+export TOKENIZERS_PARALLELISM=false
+source ~/.hf_env
+
+pip install accelerate --quiet 2>/dev/null || true
+pip install git+https://github.com/pettyjohnjn/hookbox.git --quiet 2>/dev/null || true
+pip install git+https://github.com/pettyjohnjn/subset-kl.git --quiet 2>/dev/null || true
+pip install git+https://github.com/pettyjohnjn/indexed_logits.git --quiet 2>/dev/null || true
+
+# Multi-node setup
+NNODES=$(cat $PBS_NODEFILE | sort | uniq | wc -l)
+NGPUS_PER_NODE=4
+MASTER_ADDR=$(head -1 $PBS_NODEFILE)
+MASTER_PORT=29500
+
+echo "Running on ${NNODES} nodes, ${NGPUS_PER_NODE} GPUs/node"
+echo "Master: ${MASTER_ADDR}:${MASTER_PORT}"
+
+# Training
+cd src
+torchrun \
+  --nnodes=${NNODES} \
+  --nproc_per_node=${NGPUS_PER_NODE} \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
+  -m loralens.cli.main train \
+  --model_name meta-llama/Llama-3.1-405B \
+  --multinode_model_parallel \
+  --model_dtype bf16 \
+  --attn_implementation flash_attention_2 \
+  --data_source pile \
+  --lens_type lora \
+  --lora_rank 16 \
+  --loss_type subset_kl \
+  --subset_kl_k 128 \
+  --max_seq_len 2048 \
+  --batch_size 1 \
+  --num_steps 2048 \
+  --lr 5e-4 \
+  --warmup_steps 128 \
+  --tokens_per_step 131072 \
+  --kl_chunk_size 32 \
+  --amp \
+  --amp_dtype bf16 \
+  --log_every 1 \
+  --save_every 256 \
+  --output_dir ./checkpoints/llama405b_fsdp
+
+echo "Training complete."
