@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # src/loralens/lenses/__init__.py
 """
 Lenses module - Neural network modules that project activations to vocabulary space.
@@ -22,13 +21,10 @@ Example usage:
     logits = output.logits
 """
 
-=======
->>>>>>> origin/main
 from .types import LayerId, LensOutput
 from .base import BaseLens
 from .logit_lens import LogitLens
 from .tuned_lens import TunedLens
-<<<<<<< HEAD
 from .lora_lens import LoRAProjection, LoRALens
 from .factory import create_lens, register_lens, list_lenses
 
@@ -48,16 +44,3 @@ __all__ = [
     "register_lens",
     "list_lenses",
 ]
-=======
-from .lora_lens import LoRALinear, LoRALens
-
-__all__ = [
-    "LayerId",
-    "LensOutput",
-    "BaseLens",
-    "LogitLens",
-    "TunedLens",
-    "LoRALinear",
-    "LoRALens",
-]
->>>>>>> origin/main

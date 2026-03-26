@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # src/loralens/cli/main.py
 """
 Command-line interface for LoRA Lens training.
@@ -17,6 +16,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from loralens.hooks import ActivationCollector
 from loralens.losses import create_loss
 from loralens.lenses import create_lens
 from loralens.training import (
@@ -99,8 +99,6 @@ def build_dataloader_factory(config: TrainConfig, tokenizer, ddp_state: DDPState
             tokenizer=tokenizer,
             chunk_cfg=chunk_cfg,
             max_docs=config.max_docs,
-            rank=ddp_state.rank,
-            world_size=ddp_state.world_size,
         )
 
         return DataLoader(
@@ -118,13 +116,7 @@ def train(args: argparse.Namespace) -> None:
     # Build config from args
     config = TrainConfig(
         model_name=args.model_name,
-        model_revision=getattr(args, "model_revision", None),
-        tokenizer_name=getattr(args, "tokenizer_name", None),
         data_source=args.data_source,
-        text_paths=getattr(args, "text_paths", []),
-        text_mode=getattr(args, "text_mode", "lines"),
-        text_json_field=getattr(args, "text_json_field", "text"),
-        pile_split=getattr(args, "pile_split", "train"),
         lens_type=args.lens_type,
         lora_rank=args.lora_rank,
         loss_type=args.loss_type,
@@ -133,10 +125,6 @@ def train(args: argparse.Namespace) -> None:
         shared_subset_top_m=args.shared_subset_top_m,
         shared_subset_max_K=args.shared_subset_max_K,
         max_seq_len=args.max_seq_len,
-        stride=getattr(args, "stride", None),
-        drop_remainder=getattr(args, "drop_remainder", True),
-        document_separated=getattr(args, "document_separated", True),
-        max_docs=getattr(args, "max_docs", None),
         per_gpu_batch_size=args.batch_size,
         num_steps=args.num_steps,
         lr=args.lr,
@@ -195,8 +183,7 @@ def train(args: argparse.Namespace) -> None:
         if ddp_state.is_main:
             logger.info(f"Loading model: {config.model_name}")
 
-        tokenizer_name = config.tokenizer_name or config.model_name
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        tokenizer = AutoTokenizer.from_pretrained(config.model_name)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
@@ -267,12 +254,7 @@ def train(args: argparse.Namespace) -> None:
 
         else:
             # Path 3: Standard single-GPU (with optional DDP replication)
-            model_kwargs = {}
-            if config.model_revision is not None:
-                model_kwargs["revision"] = config.model_revision
-            if config.attn_implementation is not None:
-                model_kwargs["attn_implementation"] = config.attn_implementation
-            model = AutoModelForCausalLM.from_pretrained(config.model_name, **model_kwargs)
+            model = AutoModelForCausalLM.from_pretrained(config.model_name)
             for p in model.parameters():
                 p.requires_grad = False
             model.to(ddp_state.device)
@@ -330,11 +312,15 @@ def train(args: argparse.Namespace) -> None:
             logger.info(f"Lens: {lens}")
             logger.info(f"Loss: {loss_fn}")
 
+        # Create collector
+        collector = ActivationCollector(model)
+
         # Create trainer
         trainer = LensTrainer(
             model=model,
             lens=lens,
             loss_fn=loss_fn,
+            collector=collector,
             config=config,
             ddp_state=ddp_state,
             amp_ctx=amp_ctx,
@@ -379,14 +365,7 @@ def main() -> None:
 
     # Model
     train_parser.add_argument("--model_name", type=str, default="gpt2")
-    train_parser.add_argument("--model_revision", type=str, default=None)
-    train_parser.add_argument("--tokenizer_name", type=str, default=None)
     train_parser.add_argument("--data_source", choices=["text", "pile"], default="pile")
-    train_parser.add_argument("--text_paths", nargs="+", default=[],
-                              help="Text/JSONL input files when --data_source text")
-    train_parser.add_argument("--text_mode", choices=["lines", "whole", "jsonl"], default="lines")
-    train_parser.add_argument("--text_json_field", type=str, default="text")
-    train_parser.add_argument("--pile_split", type=str, default="train")
 
     # Lens
     train_parser.add_argument("--lens_type", choices=["logit", "tuned", "lora"], default="lora")
@@ -404,12 +383,6 @@ def main() -> None:
 
     # Training
     train_parser.add_argument("--max_seq_len", type=int, default=1024)
-    train_parser.add_argument("--stride", type=int, default=None)
-    train_parser.add_argument("--max_docs", type=int, default=None)
-    train_parser.add_argument("--drop_remainder", action="store_true", default=True)
-    train_parser.add_argument("--no_drop_remainder", action="store_false", dest="drop_remainder")
-    train_parser.add_argument("--document_separated", action="store_true", default=True)
-    train_parser.add_argument("--no_document_separated", action="store_false", dest="document_separated")
     train_parser.add_argument("--batch_size", type=int, default=4)
     train_parser.add_argument("--num_steps", type=int, default=1000)
     train_parser.add_argument("--lr", type=float, default=1e-3)
@@ -463,32 +436,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-=======
-import logging
-from dataclasses import dataclass
-from typing import Union, Literal, Optional
-
-from simple_parsing import ArgumentParser, ConflictResolution
-from loralens.training.loop import Train
-from loralens.eval.loop import Eval
-
-@dataclass
-class Main:
-    command: Union[Train, Eval]
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
-
-    def execute(self):
-        logging.basicConfig(level=self.log_level, format="[%(levelname)s] %(message)s")
-        self.command.execute()
-
-def main(args: Optional[list[str]] = None):
-    parser = ArgumentParser(conflict_resolution=ConflictResolution.EXPLICIT)
-    parser.add_arguments(Main, dest="prog")
-    args = parser.parse_args(args=args)
-    prog: Main = args.prog
-    prog.execute()
-
-
-if __name__ == "__main__":
-    main()
->>>>>>> origin/main

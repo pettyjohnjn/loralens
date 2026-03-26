@@ -18,6 +18,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
+from loralens.hooks import ActivationCollector
 from loralens.losses import BaseLoss, SubsetKLLoss
 from loralens.losses.shared_subset_kl import SharedSubsetKLLoss
 from loralens.lenses import BaseLens
@@ -26,11 +27,7 @@ from .config import TrainConfig
 from .distributed import DDPState, all_reduce_sum
 from .amp import AMPContext
 from .model_shard import ModelShardState, disabled_shard_state
-
-
 logger = logging.getLogger(__name__)
-
-
 def _get_model_input_device(model: nn.Module) -> torch.device:
     """
     Determine which device holds the model's embedding layer.
@@ -50,8 +47,6 @@ def _get_model_input_device(model: nn.Module) -> torch.device:
 
     # Non-sharded: use first parameter's device
     return next(model.parameters()).device
-
-
 def _masked_kl_logtarget(
     student_logits: torch.Tensor,
     teacher_logprobs: torch.Tensor,
@@ -85,8 +80,6 @@ def _masked_kl_logtarget(
         return num / denom
     else:
         raise ValueError(f"Unknown reduction: {reduction}")
-
-
 class LensTrainer:
     """Orchestrates lens training with memory-optimized layer-wise backward."""
 
@@ -95,6 +88,7 @@ class LensTrainer:
         model: nn.Module,
         lens: BaseLens,
         loss_fn: BaseLoss,
+        collector: ActivationCollector,
         config: TrainConfig,
         ddp_state: DDPState,
         amp_ctx: AMPContext,
@@ -103,6 +97,7 @@ class LensTrainer:
         self.model = model
         self.lens = lens
         self.loss_fn = loss_fn
+        self.collector = collector
         self.config = config
         self.ddp_state = ddp_state
         self.amp_ctx = amp_ctx
@@ -152,7 +147,12 @@ class LensTrainer:
             )
 
         data_iter = iter(dataloader_factory())
-        self._train_loop(lens, optimizer, scheduler, data_iter, dataloader_factory)
+        self.collector.attach()
+
+        try:
+            self._train_loop(lens, optimizer, scheduler, data_iter, dataloader_factory)
+        finally:
+            self.collector.detach()
 
     def _train_loop(
         self,
@@ -648,3 +648,4 @@ class LensTrainer:
             "lens_state_dict": raw_lens.state_dict(),
         }, path)
         logger.info(f"Saved checkpoint to {path}")
+

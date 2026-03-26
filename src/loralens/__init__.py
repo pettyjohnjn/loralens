@@ -1,5 +1,4 @@
 # src/loralens/__init__.py
-<<<<<<< HEAD
 """LoRA Lens - Scalable lens-based interpretability for large language models."""
 
 __version__ = "0.3.0"
@@ -33,7 +32,3 @@ __all__ = [
     "HFUnembed",
     "get_model_config",
 ]
-=======
-
-__all__ = []
->>>>>>> origin/main

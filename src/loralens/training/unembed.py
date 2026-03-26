@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # src/loralens/training/unembed.py
 """Unembedding utilities for extracting LM heads from HuggingFace models."""
 
@@ -6,17 +5,12 @@ from __future__ import annotations
 
 from typing import Dict, Any, Optional
 
-=======
-from __future__ import annotations
-
->>>>>>> origin/main
 import torch
 import torch.nn as nn
 
 
 class HFUnembed(nn.Module):
     """
-<<<<<<< HEAD
     Unembedding module that extracts and applies LM head from HF models.
 
     For GPT-2-like models: applies ln_f then lm_head.
@@ -49,25 +43,11 @@ class HFUnembed(nn.Module):
             self.layer_norm = model.model.norm
 
         # Find LM head
-=======
-    HF unembed that matches tuned-lens behavior for GPT-2-like models:
-      logits = lm_head(ln_f(h)) if ln_f exists, else lm_head(h)
-    """
-
-    def __init__(self, model):
-        super().__init__()
-        self.ln_f = None
-
-        if hasattr(model, "transformer") and hasattr(model.transformer, "ln_f"):
-            self.ln_f = model.transformer.ln_f
-
->>>>>>> origin/main
         if hasattr(model, "lm_head"):
             self.lm_head = model.lm_head
         elif hasattr(model, "get_output_embeddings"):
             self.lm_head = model.get_output_embeddings()
         else:
-<<<<<<< HEAD
             raise ValueError("Could not locate LM head in model.")
 
         # Get vocab size
@@ -196,17 +176,3 @@ def get_model_config(model: nn.Module) -> Dict[str, Any]:
         "hidden_size": hidden_size,
         "vocab_size": vocab_size,
     }
-=======
-            raise ValueError("Could not locate LM head (lm_head / output_embeddings).")
-
-        if hasattr(self.lm_head, "out_features"):
-            self.vocab_size = int(self.lm_head.out_features)
-
-        for p in self.parameters():
-            p.requires_grad = False
-
-    def forward(self, h: torch.Tensor) -> torch.Tensor:
-        if self.ln_f is not None:
-            h = self.ln_f(h)
-        return self.lm_head(h)
->>>>>>> origin/main
