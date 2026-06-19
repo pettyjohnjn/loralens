@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from dataclasses import dataclass
 
 import torch
@@ -48,14 +49,41 @@ def init_ddp(backend: str = "nccl", enabled: bool = True) -> DDPState:
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
 
+    print(
+        "[ddp] host=%s rank=%s local_rank=%s world_size=%s "
+        "cuda_visible_devices=%s"
+        % (
+            socket.gethostname(),
+            rank,
+            local_rank,
+            world_size,
+            os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"),
+        ),
+        flush=True,
+    )
+
     if torch.cuda.is_available():
+        print(
+            "[ddp] host=%s torch.cuda.device_count=%s before set_device"
+            % (socket.gethostname(), torch.cuda.device_count()),
+            flush=True,
+        )
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
+        free_mem, total_mem = torch.cuda.mem_get_info(device)
+        print(
+            "[ddp] host=%s rank=%s using device=%s free_mem=%s total_mem=%s"
+            % (socket.gethostname(), rank, device, free_mem, total_mem),
+            flush=True,
+        )
     else:
         device = torch.device("cpu")
 
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
-    dist.barrier()
+    if device.type == "cuda":
+        dist.barrier(device_ids=[device.index])
+    else:
+        dist.barrier()
 
     return DDPState(enabled=True, rank=rank, world_size=world_size, local_rank=local_rank, device=device)
 
@@ -64,7 +92,10 @@ def shutdown_ddp(state: DDPState) -> None:
     """Clean up distributed training."""
     if not state.enabled:
         return
-    dist.barrier()
+    if not dist.is_available() or not dist.is_initialized():
+        return
+    if state.device.type == "cuda":
+        torch.cuda.synchronize(state.device)
     dist.destroy_process_group()
 
 

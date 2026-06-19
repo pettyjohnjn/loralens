@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 
 from .base import BaseLens
-from .types import LayerId, canonical_layer_id
+from .types import LayerId, canonical_layer_id, module_safe_layer_key
 
 
 class LoRAProjection(nn.Module):
@@ -85,7 +85,6 @@ class LoRAProjection(nn.Module):
 
         h' = h + B @ A @ dropout(h) * scaling + bias
         """
-        # Residual connection (identity) + low-rank delta
         lora_out = self.lora_B(self.lora_A(self.dropout(x))) * self.scaling
         return x + lora_out + self.bias
 
@@ -162,9 +161,12 @@ class LoRALens(BaseLens):
 
         # Create per-layer LoRA projections (NO d×d matrices!)
         self._layer_ids = [canonical_layer_id(lid) for lid in layer_ids]
+        self._module_keys = {
+            lid: module_safe_layer_key(lid) for lid in self._layer_ids
+        }
 
         self.projections = nn.ModuleDict({
-            lid: LoRAProjection(
+            self._module_keys[lid]: LoRAProjection(
                 hidden_size=hidden_size,
                 r=r,
                 alpha=alpha,
@@ -178,6 +180,14 @@ class LoRALens(BaseLens):
         """List of layer IDs."""
         return list(self._layer_ids)
 
+    def _get_unembed_weight_dtype(self) -> Optional[torch.dtype]:
+        """Infer the dtype expected by the frozen unembed weights."""
+        if hasattr(self.unembed, "lm_head"):
+            return self.unembed.lm_head.weight.dtype
+        if hasattr(self.unembed, "weight"):
+            return self.unembed.weight.dtype
+        return None
+
     def compute_logits(
         self,
         activations: torch.Tensor,
@@ -188,7 +198,8 @@ class LoRALens(BaseLens):
             raise ValueError("LoRALens requires a layer argument.")
 
         lid = canonical_layer_id(layer)
-        if lid not in self.projections:
+        module_key = self._module_keys.get(lid)
+        if module_key is None or module_key not in self.projections:
             raise KeyError(
                 f"Layer {layer!r} not found. Available: {self.layer_ids}"
             )
@@ -196,9 +207,13 @@ class LoRALens(BaseLens):
         batch, seq, hidden = activations.shape
 
         # Apply LoRA projection (includes residual)
-        proj = self.projections[lid]
+        proj = self.projections[module_key]
         flat = activations.view(batch * seq, hidden)
         flat = proj(flat)
+
+        unembed_dtype = self._get_unembed_weight_dtype()
+        if unembed_dtype is not None and flat.dtype != unembed_dtype:
+            flat = flat.to(unembed_dtype)
 
         # Unembed
         flat_logits = self.unembed(flat)
@@ -235,13 +250,14 @@ class LoRALens(BaseLens):
             raise ValueError("LoRALens requires a layer argument.")
 
         lid = canonical_layer_id(layer)
-        if lid not in self.projections:
+        module_key = self._module_keys.get(lid)
+        if module_key is None or module_key not in self.projections:
             raise KeyError(f"Layer {layer!r} not found.")
 
         batch, seq, hidden = activations.shape
 
         # Apply LoRA projection
-        proj = self.projections[lid]
+        proj = self.projections[module_key]
         flat = activations.view(batch * seq, hidden)
         flat = proj(flat)  # [B*T, d]
 
@@ -260,10 +276,16 @@ class LoRALens(BaseLens):
             b = getattr(self.unembed, 'bias', None)
         else:
             # Fallback to full computation
+            unembed_dtype = self._get_unembed_weight_dtype()
+            if unembed_dtype is not None and flat.dtype != unembed_dtype:
+                flat = flat.to(unembed_dtype)
             full_logits = self.unembed(flat).view(batch, seq, -1)
             if vocab_indices.dim() == 1:
                 return full_logits[..., vocab_indices]
             return torch.gather(full_logits, -1, vocab_indices)
+
+        if flat.dtype != W.dtype:
+            flat = flat.to(W.dtype)
 
         # Efficient subset computation
         if vocab_indices.dim() == 1:
@@ -299,6 +321,92 @@ class LoRALens(BaseLens):
                 logits_flat = torch.gather(full_logits, dim=1, index=idx_flat.long())
 
             return logits_flat.view(batch, seq, k)
+
+    def compute_logits_subset_with_logsumexp(
+        self,
+        activations: torch.Tensor,
+        vocab_indices: torch.Tensor,
+        layer: Optional[LayerId] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute subset logits plus the full-vocab logsumexp without storing [N, V]."""
+        if layer is None:
+            raise ValueError("LoRALens requires a layer argument.")
+
+        lid = canonical_layer_id(layer)
+        module_key = self._module_keys.get(lid)
+        if module_key is None or module_key not in self.projections:
+            raise KeyError(f"Layer {layer!r} not found.")
+
+        batch, seq, hidden = activations.shape
+        proj = self.projections[module_key]
+        flat = activations.view(batch * seq, hidden)
+        flat = proj(flat)
+
+        if hasattr(self.unembed, "layer_norm") and self.unembed.layer_norm is not None:
+            flat = self.unembed.layer_norm(flat)
+        elif hasattr(self.unembed, "ln_f") and self.unembed.ln_f is not None:
+            flat = self.unembed.ln_f(flat)
+
+        if hasattr(self.unembed, "lm_head"):
+            W = self.unembed.lm_head.weight
+            b = self.unembed.lm_head.bias
+        elif hasattr(self.unembed, "weight"):
+            W = self.unembed.weight
+            b = getattr(self.unembed, "bias", None)
+        else:
+            unembed_dtype = self._get_unembed_weight_dtype()
+            if unembed_dtype is not None and flat.dtype != unembed_dtype:
+                flat = flat.to(unembed_dtype)
+            full_logits = self.unembed(flat).view(batch, seq, -1)
+            logsumexp = full_logits.float().logsumexp(dim=-1, keepdim=True)
+            if vocab_indices.dim() == 1:
+                subset_logits = full_logits[..., vocab_indices]
+            else:
+                subset_logits = torch.gather(full_logits, -1, vocab_indices)
+            return subset_logits, logsumexp
+
+        if flat.dtype != W.dtype:
+            flat = flat.to(W.dtype)
+
+        if vocab_indices.dim() == 1:
+            k = vocab_indices.shape[0]
+            W_subset = W[vocab_indices]
+            subset_flat = flat @ W_subset.T
+            if b is not None:
+                subset_flat = subset_flat + b[vocab_indices]
+            subset_logits = subset_flat.view(batch, seq, k)
+        else:
+            from loralens.ops import indexed_logits, indexed_logits_available
+
+            N = batch * seq
+            k = vocab_indices.shape[-1]
+            idx_flat = vocab_indices.view(N, k).contiguous()
+
+            if indexed_logits_available() and flat.is_cuda:
+                subset_flat = indexed_logits(
+                    H=flat.contiguous(),
+                    W=W.contiguous(),
+                    idx=idx_flat,
+                    bias=b,
+                )
+            else:
+                full_logits = flat @ W.T
+                if b is not None:
+                    full_logits = full_logits + b
+                subset_flat = torch.gather(full_logits, dim=1, index=idx_flat.long())
+            subset_logits = subset_flat.view(batch, seq, k)
+
+        vocab_chunk = 4096
+        logsumexp = None
+        for start in range(0, W.shape[0], vocab_chunk):
+            end = min(start + vocab_chunk, W.shape[0])
+            logits_chunk = flat @ W[start:end].T
+            if b is not None:
+                logits_chunk = logits_chunk + b[start:end]
+            chunk_logsumexp = logits_chunk.float().logsumexp(dim=-1, keepdim=True)
+            logsumexp = chunk_logsumexp if logsumexp is None else torch.logaddexp(logsumexp, chunk_logsumexp)
+
+        return subset_logits, logsumexp.view(batch, seq, 1)
 
     def trainable_parameters(self) -> int:
         """Count trainable parameters."""

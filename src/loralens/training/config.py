@@ -39,12 +39,33 @@ class TrainConfig:
     # Lens
     lens_type: Literal["logit", "tuned", "lora"] = "lora"
     lora_rank: int = 16
-    lora_alpha: float = 1.0
+    lora_alpha: Optional[float] = None
+    lora_init: Literal["default_lora", "mean_shift", "ridge_svd"] = "default_lora"
+    lora_init_calibration_tokens: int = 50000
+    lora_init_ridge_lambda: float = 1e-3
+    lora_init_ridge_lambda_scale: Literal["trace_xxt_over_d", "absolute"] = "trace_xxt_over_d"
+    lora_init_stats_dtype: Literal["float32", "float64"] = "float32"
+    lora_init_jitter: float = 1e-6
+    lora_init_svd_metric: Literal["residual", "unembed"] = "residual"
+    lora_init_normalization: Literal["none", "per_dim_std"] = "none"
+    activation_site_preset: Literal[
+        "residual",
+        "llama_expanded",
+        "gpt2_expanded",
+        "gpt2_attention",
+    ] = "residual"
 
     # Loss
     loss_type: Literal["kl", "subset_kl", "shared_subset_kl", "ce"] = "kl"
     kl_chunk_size: Optional[int] = 128
     subset_kl_k: int = 128  # Top-k tokens for subset KL
+    subset_kl_mode: Literal["topk", "frankenstein", "hajek", "mc", "k2", "k3"] = "topk"
+    subset_kl_k_tail: int = 0  # Tail samples for head/tail subset KL
+    subset_kl_tail_clip: float = 50.0  # Max importance weight for Frankenstein mode
+    subset_kl_tail_oversample: int = 4  # PPS oversample factor for Frankenstein mode
+    subset_kl_tail_proposal: Literal["target", "teacher", "mixed", "tempered"] = "target"
+    subset_kl_tail_proposal_alpha: float = 0.8
+    subset_kl_tail_proposal_tau: float = 0.7
     # Shared subset KL params
     shared_subset_top_m: int = 16  # Per-position candidates
     shared_subset_max_K: int = 512  # Max shared set size
@@ -56,6 +77,8 @@ class TrainConfig:
     lr: float = 1e-3
     weight_decay: float = 0.0
     warmup_steps: int = 0
+    lr_schedule: Literal["constant", "linear", "cosine"] = "constant"
+    min_lr_ratio: float = 0.0
     grad_clip_norm: Optional[float] = 1.0
 
     # Gradient accumulation
@@ -88,13 +111,18 @@ class TrainConfig:
 
     # Checkpointing
     save_every: int = 500
+    save_initial_checkpoint: bool = False
     output_dir: Path = Path("./checkpoints")
+    resume_checkpoint: Optional[Path] = None
 
     # Misc
     seed: int = 0
 
     def __post_init__(self):
         """Validate and set defaults."""
+        if self.lens_type == "lora" and self.lora_alpha is None:
+            self.lora_alpha = float(self.lora_rank)
+
         if self.token_shift is None:
             self.token_shift = 0 if self.loss_type in ("kl", "subset_kl", "shared_subset_kl") else 1
 
@@ -102,6 +130,8 @@ class TrainConfig:
             self.stride = self.max_seq_len
 
         self.output_dir = Path(self.output_dir)
+        if self.resume_checkpoint is not None:
+            self.resume_checkpoint = Path(self.resume_checkpoint)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -120,6 +150,8 @@ class TrainConfig:
         """Create from dictionary."""
         if "output_dir" in d:
             d["output_dir"] = Path(d["output_dir"])
+        if d.get("resume_checkpoint") is not None:
+            d["resume_checkpoint"] = Path(d["resume_checkpoint"])
         if "text_paths" in d:
             d["text_paths"] = [Path(p) for p in d["text_paths"]]
         return cls(**d)

@@ -8,22 +8,28 @@ Usage:
 """
 
 import argparse
+import gc
 import logging
+import math
 import random
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from loralens.hooks import ActivationCollector
+from loralens.initialization import LoRAInitConfig, initialize_lora_lens
+from loralens.lenses import LoRALens, create_lens
 from loralens.losses import create_loss
-from loralens.lenses import create_lens
 from loralens.training import (
     LensTrainer,
     TrainConfig,
     HFUnembed,
     get_model_config,
+    adapt_activation_site_plan_for_model,
+    build_activation_site_plan,
     DDPState,
     init_ddp,
     shutdown_ddp,
@@ -42,6 +48,70 @@ from loralens.data import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _checkpoint_step_key(path: Path) -> int:
+    stem = path.stem
+    try:
+        return int(stem.rsplit("_", 1)[-1])
+    except (IndexError, ValueError):
+        return -1
+
+
+def _resolve_resume_checkpoint_path(path: Path) -> Path:
+    path = Path(path)
+    if path.is_file():
+        return path
+
+    if not path.is_dir():
+        raise FileNotFoundError(f"Resume checkpoint path does not exist: {path}")
+
+    candidates = sorted(
+        (p for p in path.glob("lens_step_*.pt") if p.is_file()),
+        key=lambda p: (_checkpoint_step_key(p), p.name),
+    )
+    if not candidates:
+        raise FileNotFoundError(f"No checkpoints matching lens_step_*.pt found in {path}")
+    return candidates[-1]
+
+
+def _load_resume_checkpoint(checkpoint_path: Path, lens: torch.nn.Module) -> dict[str, Any]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    lens.load_checkpoint_state_dict(checkpoint["lens_state_dict"])
+    return checkpoint
+
+
+def _validate_resume_checkpoint(config: TrainConfig, checkpoint: dict[str, Any], path: Path) -> None:
+    saved = checkpoint.get("config")
+    if not isinstance(saved, dict):
+        raise ValueError(f"Checkpoint {path} is missing saved config metadata")
+
+    expected_pairs = (
+        ("model_name", config.model_name),
+        ("lens_type", config.lens_type),
+        ("loss_type", config.loss_type),
+        ("lora_rank", config.lora_rank),
+        ("lora_alpha", config.lora_alpha),
+        ("subset_kl_mode", config.subset_kl_mode),
+        ("subset_kl_k", config.subset_kl_k),
+        ("subset_kl_k_tail", config.subset_kl_k_tail),
+        ("kl_chunk_size", config.kl_chunk_size),
+        ("activation_site_preset", config.activation_site_preset),
+        ("token_shift", config.token_shift),
+        ("max_seq_len", config.max_seq_len),
+    )
+
+    mismatches = []
+    for key, expected in expected_pairs:
+        observed = saved.get(key)
+        if observed != expected:
+            mismatches.append(f"{key}: checkpoint={observed!r}, requested={expected!r}")
+
+    if mismatches:
+        raise ValueError(
+            f"Checkpoint {path} does not match the requested run configuration:\n"
+            + "\n".join(mismatches)
+        )
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -119,23 +189,45 @@ def train(args: argparse.Namespace) -> None:
         data_source=args.data_source,
         lens_type=args.lens_type,
         lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_init=args.lora_init,
+        lora_init_calibration_tokens=args.lora_init_calibration_tokens,
+        lora_init_ridge_lambda=args.lora_init_ridge_lambda,
+        lora_init_ridge_lambda_scale=args.lora_init_ridge_lambda_scale,
+        lora_init_stats_dtype=args.lora_init_stats_dtype,
+        lora_init_jitter=args.lora_init_jitter,
+        lora_init_svd_metric=args.lora_init_svd_metric,
+        lora_init_normalization=args.lora_init_normalization,
+        activation_site_preset=args.activation_site_preset,
         loss_type=args.loss_type,
         kl_chunk_size=args.kl_chunk_size,
         subset_kl_k=args.subset_kl_k,
+        subset_kl_mode=args.subset_kl_mode,
+        subset_kl_k_tail=args.subset_kl_k_tail,
+        subset_kl_tail_clip=args.subset_kl_tail_clip,
+        subset_kl_tail_oversample=args.subset_kl_tail_oversample,
+        subset_kl_tail_proposal=args.subset_kl_tail_proposal,
+        subset_kl_tail_proposal_alpha=args.subset_kl_tail_proposal_alpha,
+        subset_kl_tail_proposal_tau=args.subset_kl_tail_proposal_tau,
         shared_subset_top_m=args.shared_subset_top_m,
         shared_subset_max_K=args.shared_subset_max_K,
+        token_shift=args.token_shift,
         max_seq_len=args.max_seq_len,
         per_gpu_batch_size=args.batch_size,
         num_steps=args.num_steps,
         lr=args.lr,
         warmup_steps=args.warmup_steps,
+        lr_schedule=args.lr_schedule,
+        min_lr_ratio=args.min_lr_ratio,
         tokens_per_step=args.tokens_per_step,
         amp_enabled=args.amp,
         amp_dtype=args.amp_dtype,
         ddp_enabled=args.ddp,
         log_every=args.log_every,
         save_every=args.save_every,
+        save_initial_checkpoint=args.save_initial_checkpoint,
         output_dir=Path(args.output_dir),
+        resume_checkpoint=Path(args.resume_checkpoint) if args.resume_checkpoint else None,
         seed=args.seed,
         # Model parallel
         model_parallel=args.model_parallel,
@@ -176,7 +268,21 @@ def train(args: argparse.Namespace) -> None:
         logger.info(f"Config: {config}")
         logger.info(f"DDP: {ddp_state}")
 
-    # Keep reference to FSDP model (it IS the model, no separate engine)
+    # Keep references explicit so we can tear them down on exit.
+    tokenizer = None
+    model = None
+    unembed = None
+    loss_fn = None
+    lens = None
+    collector = None
+    trainer = None
+    optimizer = None
+    scheduler = None
+    dataloader_factory = None
+    shard_state = None
+    activation_site_plan = None
+    start_step = 0
+    resumed_total_tokens = 0
 
     try:
         # Load model and tokenizer
@@ -217,6 +323,11 @@ def train(args: argparse.Namespace) -> None:
 
             # Get config and create unembed BEFORE FSDP wrapping
             model_cfg = get_model_config(_cpu_model)
+            activation_site_plan = build_activation_site_plan(
+                _cpu_model,
+                num_layers=model_cfg["num_layers"],
+                preset=config.activation_site_preset,
+            )
             unembed = HFUnembed(_cpu_model)
             unembed = unembed.clone_to_device(ddp_state.device)
             logger.info(f"Cloned unembed to {ddp_state.device} (pre-FSDP)")
@@ -232,6 +343,10 @@ def train(args: argparse.Namespace) -> None:
                 _preloaded_model=_cpu_model,  # Pass already-loaded model
             )
             del _cpu_model
+            activation_site_plan = adapt_activation_site_plan_for_model(
+                model,
+                activation_site_plan,
+            )
 
             # Trainer uses standard DDP path (FSDP handles sharding transparently)
             shard_state = disabled_shard_state(ddp_state.device)
@@ -254,7 +369,16 @@ def train(args: argparse.Namespace) -> None:
 
         else:
             # Path 3: Standard single-GPU (with optional DDP replication)
-            model = AutoModelForCausalLM.from_pretrained(config.model_name)
+            model_kwargs = {
+                "torch_dtype": model_dtype,
+                "low_cpu_mem_usage": True,
+            }
+            if config.model_revision is not None:
+                model_kwargs["revision"] = config.model_revision
+            if config.attn_implementation is not None:
+                model_kwargs["attn_implementation"] = config.attn_implementation
+
+            model = AutoModelForCausalLM.from_pretrained(config.model_name, **model_kwargs)
             for p in model.parameters():
                 p.requires_grad = False
             model.to(ddp_state.device)
@@ -265,6 +389,11 @@ def train(args: argparse.Namespace) -> None:
         # Get model config (skip for multinode, already done above)
         if not config.multinode_model_parallel:
             model_cfg = get_model_config(model)
+            activation_site_plan = build_activation_site_plan(
+                model,
+                num_layers=model_cfg["num_layers"],
+                preset=config.activation_site_preset,
+            )
 
         # Create unembed (skip for multinode, already done above)
         if not config.multinode_model_parallel:
@@ -273,12 +402,34 @@ def train(args: argparse.Namespace) -> None:
                 unembed = unembed.clone_to_device(lens_device)
                 logger.info(f"Cloned unembed to {lens_device}")
 
+        if (
+            ddp_state.is_main
+            and config.lens_type == "tuned"
+            and activation_site_plan.site_count > model_cfg["num_layers"]
+        ):
+            logger.warning(
+                "Using tuned lenses with activation_site_preset=%s creates one full-rank "
+                "translator per site (%s total sites). For Llama 3 8B this is likely too "
+                "large for routine runs; use residual-only or switch to LoRA for expanded sites.",
+                config.activation_site_preset,
+                activation_site_plan.site_count,
+            )
+
         # Create loss function
         loss_kwargs = {"reduction": "mean"}
         if config.loss_type == "kl":
-            loss_kwargs["chunk_size"] = config.kl_chunk_size
+            loss_kwargs["chunk_size"] = (
+                config.kl_chunk_size if config.kl_chunk_size > 0 else None
+            )
         elif config.loss_type == "subset_kl":
             loss_kwargs["k"] = config.subset_kl_k
+            loss_kwargs["mode"] = config.subset_kl_mode
+            loss_kwargs["k_tail"] = config.subset_kl_k_tail
+            loss_kwargs["tail_clip"] = config.subset_kl_tail_clip
+            loss_kwargs["tail_oversample"] = config.subset_kl_tail_oversample
+            loss_kwargs["tail_proposal"] = config.subset_kl_tail_proposal
+            loss_kwargs["tail_proposal_alpha"] = config.subset_kl_tail_proposal_alpha
+            loss_kwargs["tail_proposal_tau"] = config.subset_kl_tail_proposal_tau
         elif config.loss_type == "shared_subset_kl":
             loss_kwargs["top_m"] = config.shared_subset_top_m
             loss_kwargs["max_K"] = config.shared_subset_max_K
@@ -286,7 +437,7 @@ def train(args: argparse.Namespace) -> None:
         loss_fn = create_loss(config.loss_type, **loss_kwargs)
 
         # Create lens
-        layer_ids = list(range(model_cfg["num_layers"]))
+        layer_ids = activation_site_plan.site_ids
         lens_kwargs = {}
         if config.lens_type in ("tuned", "lora"):
             lens_kwargs["layer_ids"] = layer_ids
@@ -294,6 +445,7 @@ def train(args: argparse.Namespace) -> None:
             lens_kwargs["unembed"] = unembed
         if config.lens_type == "lora":
             lens_kwargs["r"] = config.lora_rank
+            lens_kwargs["alpha"] = config.lora_alpha
         if config.lens_type == "logit":
             lens_kwargs["unembed"] = unembed
 
@@ -308,26 +460,71 @@ def train(args: argparse.Namespace) -> None:
         lens.to(device=lens_device, dtype=amp_ctx.get_lens_dtype())
         lens.train()
 
+        if config.resume_checkpoint is not None:
+            config.resume_checkpoint = _resolve_resume_checkpoint_path(config.resume_checkpoint)
+            if ddp_state.is_main:
+                logger.info(f"Loading checkpoint: {config.resume_checkpoint}")
+            checkpoint = _load_resume_checkpoint(config.resume_checkpoint, lens)
+            _validate_resume_checkpoint(config, checkpoint, config.resume_checkpoint)
+            start_step = int(checkpoint.get("step", 0))
+            resumed_total_tokens = int(checkpoint.get("total_tokens", 0))
+            if ddp_state.is_main:
+                logger.info(
+                    "Resuming from step %s with total_tokens=%s",
+                    start_step,
+                    resumed_total_tokens,
+                )
+
         if ddp_state.is_main:
             logger.info(f"Lens: {lens}")
             logger.info(f"Loss: {loss_fn}")
+            logger.info(
+                "Activation sites: preset=%s count=%s",
+                config.activation_site_preset,
+                activation_site_plan.site_count,
+            )
+
+        # Create dataloader factory before optional calibration initialization.
+        dataloader_factory = build_dataloader_factory(config, tokenizer, ddp_state)
 
         # Create collector
-        collector = ActivationCollector(model)
+        collector = ActivationCollector(model, custom_hooks=activation_site_plan.custom_hooks)
 
-        # Create trainer
-        trainer = LensTrainer(
-            model=model,
-            lens=lens,
-            loss_fn=loss_fn,
-            collector=collector,
-            config=config,
-            ddp_state=ddp_state,
-            amp_ctx=amp_ctx,
-            shard_state=shard_state,
-        )
+        if config.lora_init != "default_lora":
+            if config.lens_type != "lora" or not isinstance(lens, LoRALens):
+                raise ValueError("--lora_init is only supported with --lens_type lora")
+            if config.resume_checkpoint is not None:
+                if ddp_state.is_main:
+                    logger.warning(
+                        "Skipping lora_init=%s because resume_checkpoint is set.",
+                        config.lora_init,
+                    )
+            else:
+                if ddp_state.is_main:
+                    logger.info("Applying LoRA initialization: %s", config.lora_init)
+                initialize_lora_lens(
+                    lens=lens,
+                    model=model,
+                    collector=collector,
+                    activation_site_plan=activation_site_plan,
+                    dataloader_factory=dataloader_factory,
+                    ddp_state=ddp_state,
+                    lens_device=lens_device,
+                    shard_state=shard_state,
+                    config=LoRAInitConfig(
+                        mode=config.lora_init,
+                        calibration_tokens=config.lora_init_calibration_tokens,
+                        ridge_lambda=config.lora_init_ridge_lambda,
+                        ridge_lambda_scale=config.lora_init_ridge_lambda_scale,
+                        stats_dtype=config.lora_init_stats_dtype,
+                        jitter=config.lora_init_jitter,
+                        svd_metric=config.lora_init_svd_metric,
+                        normalization=config.lora_init_normalization,
+                    ),
+                    token_shift=config.token_shift,
+                )
 
-        # Create optimizer
+        # Create optimizer after optional initialization so optimizer state starts clean.
         optimizer = torch.optim.AdamW(
             lens.parameters(),
             lr=config.lr,
@@ -336,21 +533,75 @@ def train(args: argparse.Namespace) -> None:
 
         # Create scheduler
         scheduler = None
-        if config.warmup_steps > 0:
+        if config.warmup_steps > 0 or config.lr_schedule != "constant":
             def lr_lambda(step):
                 if step < config.warmup_steps:
                     return (step + 1) / config.warmup_steps
-                return 1.0
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+                if config.lr_schedule == "constant":
+                    return 1.0
 
-        # Create dataloader factory
-        dataloader_factory = build_dataloader_factory(config, tokenizer, ddp_state)
+                decay_steps = max(1, config.num_steps - config.warmup_steps)
+                progress = min(1.0, max(0.0, (step - config.warmup_steps + 1) / decay_steps))
+                if config.lr_schedule == "linear":
+                    decay = 1.0 - progress
+                elif config.lr_schedule == "cosine":
+                    decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+                else:
+                    raise ValueError(f"Unknown lr_schedule: {config.lr_schedule}")
+                return config.min_lr_ratio + (1.0 - config.min_lr_ratio) * decay
+
+            if start_step > 0:
+                for group in optimizer.param_groups:
+                    group.setdefault("initial_lr", config.lr)
+                scheduler = torch.optim.lr_scheduler.LambdaLR(
+                    optimizer,
+                    lr_lambda,
+                    last_epoch=start_step - 1,
+                )
+            else:
+                scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+        # Create trainer
+        trainer = LensTrainer(
+            model=model,
+            lens=lens,
+            loss_fn=loss_fn,
+            collector=collector,
+            activation_site_plan=activation_site_plan,
+            config=config,
+            ddp_state=ddp_state,
+            amp_ctx=amp_ctx,
+            shard_state=shard_state,
+            start_step=start_step,
+            start_total_tokens=resumed_total_tokens,
+        )
 
         # Train
         trainer.train(dataloader_factory, optimizer, scheduler)
 
     finally:
-        shutdown_ddp(ddp_state)
+        try:
+            if collector is not None:
+                collector.detach()
+        except Exception:
+            logger.exception("Collector cleanup failed")
+
+        try:
+            shutdown_ddp(ddp_state)
+        except Exception:
+            logger.exception("DDP shutdown failed")
+
+        del trainer, optimizer, scheduler, dataloader_factory
+        del collector, lens, loss_fn, unembed, model, tokenizer, shard_state
+
+        gc.collect()
+
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+            except Exception:
+                logger.exception("CUDA cleanup failed")
 
 
 def main() -> None:
@@ -370,16 +621,101 @@ def main() -> None:
     # Lens
     train_parser.add_argument("--lens_type", choices=["logit", "tuned", "lora"], default="lora")
     train_parser.add_argument("--lora_rank", type=int, default=16)
+    train_parser.add_argument(
+        "--lora_alpha",
+        type=float,
+        default=None,
+        help="LoRA alpha. Defaults to lora_rank when omitted.",
+    )
+    train_parser.add_argument(
+        "--lora_init",
+        choices=["default_lora", "mean_shift", "ridge_svd"],
+        default="default_lora",
+        help="Optional data-driven initialization for LoRA translators.",
+    )
+    train_parser.add_argument(
+        "--lora_init_calibration_tokens",
+        type=int,
+        default=50000,
+        help="Global non-padding token budget for data-driven LoRA initialization.",
+    )
+    train_parser.add_argument(
+        "--lora_init_ridge_lambda",
+        type=float,
+        default=1e-3,
+        help="Ridge coefficient for lora_init=ridge_svd.",
+    )
+    train_parser.add_argument(
+        "--lora_init_ridge_lambda_scale",
+        choices=["trace_xxt_over_d", "absolute"],
+        default="trace_xxt_over_d",
+        help="How to scale lora_init_ridge_lambda.",
+    )
+    train_parser.add_argument(
+        "--lora_init_stats_dtype",
+        choices=["float32", "float64"],
+        default="float32",
+        help="Accumulator dtype for LoRA calibration statistics.",
+    )
+    train_parser.add_argument(
+        "--lora_init_jitter",
+        type=float,
+        default=1e-6,
+        help="Initial diagonal jitter added if the ridge solve is ill-conditioned.",
+    )
+    train_parser.add_argument(
+        "--lora_init_svd_metric",
+        choices=["residual", "unembed"],
+        default="residual",
+        help="Metric used when truncating ridge Delta into LoRA factors.",
+    )
+    train_parser.add_argument(
+        "--lora_init_normalization",
+        choices=["none", "per_dim_std"],
+        default="none",
+        help="Optional feature normalization for ridge calibration before converting back to raw coordinates.",
+    )
+    train_parser.add_argument(
+        "--activation_site_preset",
+        choices=["residual", "llama_expanded", "gpt2_expanded", "gpt2_attention"],
+        default="residual",
+        help="Which intermediate activation sites to train lenses on.",
+    )
 
     # Loss
     train_parser.add_argument("--loss_type", choices=["kl", "subset_kl", "shared_subset_kl", "ce"], default="kl")
     train_parser.add_argument("--kl_chunk_size", type=int, default=128)
     train_parser.add_argument("--subset_kl_k", type=int, default=128,
                               help="Number of top-k tokens for subset KL")
+    train_parser.add_argument(
+        "--subset_kl_mode",
+        choices=["topk", "frankenstein", "hajek", "mc", "k2", "k3"],
+        default="topk",
+        help="Subset KL estimator: simple top-k, Frankenstein, Hajek, MC, tail K2, or tail K3",
+    )
+    train_parser.add_argument("--subset_kl_k_tail", type=int, default=0,
+                              help="Number of tail samples for head/tail subset KL")
+    train_parser.add_argument("--subset_kl_tail_clip", type=float, default=50.0,
+                              help="Maximum importance weight for Frankenstein tail samples")
+    train_parser.add_argument("--subset_kl_tail_oversample", type=int, default=4,
+                              help="Oversample factor for Frankenstein tail PPS sampling")
+    train_parser.add_argument(
+        "--subset_kl_tail_proposal",
+        choices=["target", "teacher", "mixed", "tempered"],
+        default="target",
+        help="Tail proposal for MC/Hajek/K2/K3 modes; target preserves existing behavior",
+    )
+    train_parser.add_argument("--subset_kl_tail_proposal_alpha", type=float, default=0.8,
+                              help="Target mixture weight for mixed tail proposal")
+    train_parser.add_argument("--subset_kl_tail_proposal_tau", type=float, default=0.7,
+                              help="Tempering exponent for mixed/tempered tail proposal")
     train_parser.add_argument("--shared_subset_top_m", type=int, default=16,
                               help="Per-position candidates for shared subset KL")
     train_parser.add_argument("--shared_subset_max_K", type=int, default=512,
                               help="Max shared candidate set size")
+    train_parser.add_argument("--token_shift", type=int, default=None,
+                              help="Shift labels/logits by this many tokens. "
+                                   "Defaults to 0 for KL losses and 1 for CE.")
 
     # Training
     train_parser.add_argument("--max_seq_len", type=int, default=1024)
@@ -387,6 +723,8 @@ def main() -> None:
     train_parser.add_argument("--num_steps", type=int, default=1000)
     train_parser.add_argument("--lr", type=float, default=1e-3)
     train_parser.add_argument("--warmup_steps", type=int, default=0)
+    train_parser.add_argument("--lr_schedule", choices=["constant", "linear", "cosine"], default="constant")
+    train_parser.add_argument("--min_lr_ratio", type=float, default=0.0)
     train_parser.add_argument("--tokens_per_step", type=int, default=262144)
 
     # AMP
@@ -420,7 +758,19 @@ def main() -> None:
     # Logging
     train_parser.add_argument("--log_every", type=int, default=10)
     train_parser.add_argument("--save_every", type=int, default=500)
+    train_parser.add_argument(
+        "--save_initial_checkpoint",
+        action="store_true",
+        default=False,
+        help="Save lens_step_0.pt after optional initialization and before optimizer steps.",
+    )
     train_parser.add_argument("--output_dir", type=str, default="./checkpoints")
+    train_parser.add_argument(
+        "--resume_checkpoint",
+        type=str,
+        default=None,
+        help="Checkpoint file to resume from, or a checkpoint directory containing lens_step_*.pt",
+    )
     train_parser.add_argument("--seed", type=int, default=0)
     train_parser.add_argument("--log_level", default="INFO")
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any, Dict, Optional, Union
 
 import torch
@@ -16,6 +17,12 @@ LayerId = Union[int, str]
 def canonical_layer_id(layer: LayerId) -> str:
     """Convert layer ID to canonical string form."""
     return str(layer)
+
+
+def module_safe_layer_key(layer: LayerId) -> str:
+    """Map a logical layer/site ID to a key safe for ``nn.ModuleDict``."""
+    lid = canonical_layer_id(layer)
+    return re.sub(r"[^0-9A-Za-z_]", lambda m: f"_x{ord(m.group(0)):02x}_", lid)
 
 
 @dataclass

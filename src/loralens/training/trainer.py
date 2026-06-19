@@ -6,7 +6,10 @@ and memory-optimized KL computation.
 
 from __future__ import annotations
 
+import csv
 import logging
+import os
+import tempfile
 import time
 from contextlib import nullcontext
 from typing import Callable, Iterator, List, Optional, Tuple
@@ -23,11 +26,15 @@ from loralens.losses import BaseLoss, SubsetKLLoss
 from loralens.losses.shared_subset_kl import SharedSubsetKLLoss
 from loralens.lenses import BaseLens
 
+from .activation_sites import ActivationSitePlan
 from .config import TrainConfig
 from .distributed import DDPState, all_reduce_sum
 from .amp import AMPContext
 from .model_shard import ModelShardState, disabled_shard_state
+
 logger = logging.getLogger(__name__)
+
+
 def _get_model_input_device(model: nn.Module) -> torch.device:
     """
     Determine which device holds the model's embedding layer.
@@ -47,6 +54,8 @@ def _get_model_input_device(model: nn.Module) -> torch.device:
 
     # Non-sharded: use first parameter's device
     return next(model.parameters()).device
+
+
 def _masked_kl_logtarget(
     student_logits: torch.Tensor,
     teacher_logprobs: torch.Tensor,
@@ -80,6 +89,8 @@ def _masked_kl_logtarget(
         return num / denom
     else:
         raise ValueError(f"Unknown reduction: {reduction}")
+
+
 class LensTrainer:
     """Orchestrates lens training with memory-optimized layer-wise backward."""
 
@@ -89,21 +100,29 @@ class LensTrainer:
         lens: BaseLens,
         loss_fn: BaseLoss,
         collector: ActivationCollector,
+        activation_site_plan: ActivationSitePlan,
         config: TrainConfig,
         ddp_state: DDPState,
         amp_ctx: AMPContext,
         shard_state: Optional[ModelShardState] = None,
+        start_step: int = 0,
+        start_total_tokens: int = 0,
     ) -> None:
         self.model = model
         self.lens = lens
         self.loss_fn = loss_fn
         self.collector = collector
+        self.activation_site_plan = activation_site_plan
         self.config = config
         self.ddp_state = ddp_state
         self.amp_ctx = amp_ctx
         self.shard_state = shard_state or disabled_shard_state(ddp_state.device)
-        self.global_step = 0
-        self.total_tokens = 0
+        self.start_step = start_step
+        self.end_step = config.num_steps
+        self.global_step = start_step
+        self.total_tokens = start_total_tokens
+        self._metrics_file = None
+        self._metrics_writer = None
 
         # When model-parallel, the lens device may differ from ddp_state.device
         self._lens_device = (
@@ -123,6 +142,39 @@ class LensTrainer:
             and not self._use_shared_subset_kl
         )
 
+    @staticmethod
+    def _normalize_activation(value):
+        """Unwrap hook payloads that come back as a singleton tuple/list."""
+        if isinstance(value, (tuple, list)):
+            if len(value) != 1:
+                raise ValueError(f"Expected a single activation tensor, got {type(value)}")
+            return value[0]
+        return value
+
+    def _collect_site_activations(
+        self,
+        hidden_states,
+        custom_activations,
+    ) -> list[tuple[str, torch.Tensor]]:
+        """Resolve ordered activation sites from hidden states and custom hooks."""
+        site_tensors = {}
+
+        for site_id, hidden_idx in self.activation_site_plan.hidden_state_sources.items():
+            site_tensors[site_id] = self._normalize_activation(hidden_states[hidden_idx])
+
+        for site_id, custom_key in self.activation_site_plan.custom_sources.items():
+            if custom_key not in custom_activations:
+                raise KeyError(f"Missing custom activation {custom_key!r} for site {site_id!r}")
+            site_tensors[site_id] = self._normalize_activation(custom_activations[custom_key])
+
+        ordered_sites = []
+        for site_id in self.activation_site_plan.site_ids:
+            if site_id not in site_tensors:
+                raise KeyError(f"Missing activation tensor for site {site_id!r}")
+            ordered_sites.append((site_id, site_tensors[site_id]))
+
+        return ordered_sites
+
     def train(
         self,
         dataloader_factory: Callable[[], DataLoader],
@@ -134,6 +186,8 @@ class LensTrainer:
 
         if ddp_state.is_main:
             config.output_dir.mkdir(parents=True, exist_ok=True)
+            self._write_run_config_csv()
+            self._open_metrics_csv()
 
         lens = self.lens
         if ddp_state.enabled:
@@ -146,6 +200,12 @@ class LensTrainer:
                 find_unused_parameters=True,
             )
 
+        if ddp_state.is_main and self.start_step == 0 and self.config.save_initial_checkpoint:
+            self._save_checkpoint(lens, 0)
+        if self.start_step >= self.end_step:
+            self._close_metrics_csv()
+            return
+
         data_iter = iter(dataloader_factory())
         self.collector.attach()
 
@@ -153,6 +213,7 @@ class LensTrainer:
             self._train_loop(lens, optimizer, scheduler, data_iter, dataloader_factory)
         finally:
             self.collector.detach()
+            self._close_metrics_csv()
 
     def _train_loop(
         self,
@@ -167,7 +228,7 @@ class LensTrainer:
         amp_ctx = self.amp_ctx
         is_ddp = isinstance(lens, DDP)
 
-        for step in range(1, config.num_steps + 1):
+        for step in range(self.start_step + 1, self.end_step + 1):
             self.global_step = step
             t0 = time.perf_counter()
 
@@ -240,10 +301,14 @@ class LensTrainer:
             self.total_tokens += int(accum_tokens)
             accum_loss = all_reduce_sum(accum_loss, ddp_state) / ddp_state.world_size
 
-            if ddp_state.is_main and step % config.log_every == 0:
+            completed_steps = step - self.start_step
+
+            if ddp_state.is_main and completed_steps % config.log_every == 0:
                 self._log_step(step, accum_loss.item(), accum_tokens / dt, dt, microsteps, optimizer)
 
-            if ddp_state.is_main and step % config.save_every == 0:
+            if ddp_state.is_main and (
+                completed_steps % config.save_every == 0 or step == self.end_step
+            ):
                 self._save_checkpoint(lens, step)
 
     def _get_t_slices(self, T: int) -> List[Tuple[int, int]]:
@@ -278,27 +343,25 @@ class LensTrainer:
             attn_model = attention_mask
 
 
-        with torch.no_grad():
-            with amp_ctx.autocast():
-                model_out = self.model(
-                    input_ids=input_ids_model,
-                    attention_mask=attn_model,
-                    output_hidden_states=True,
-                    use_cache=False,
-                    return_dict=False,
-                )
+        with amp_ctx.autocast():
+            activations = self.collector.collect_with_grad(
+                input_ids=input_ids_model,
+                attention_mask=attn_model,
+            )
 
         if self.shard_state.enabled:
             del input_ids_model, attn_model
 
-        # Unpack tuple output
-        teacher_logits_full = model_out[0]  # [B, T, V]
-        hidden_states = model_out[1] if len(model_out) > 1 else None
+        teacher_logits_full = activations.logits
+        hidden_states = activations.hidden_states
+        custom_activations = activations.custom
 
+        if teacher_logits_full is None:
+            raise RuntimeError("Model did not return logits")
         if hidden_states is None:
             raise RuntimeError("Model did not return hidden_states")
 
-        per_layer_acts = hidden_states[1:]  # Drop embeddings
+        ordered_site_acts = self._collect_site_activations(hidden_states, custom_activations)
 
         # --- Move outputs to lens device (model-parallel path) ---
         if self.shard_state.enabled:
@@ -317,11 +380,13 @@ class LensTrainer:
             labels_full = input_ids
 
 
-        del model_out, hidden_states
+        del activations, hidden_states, custom_activations
 
         # Get T-dimension slices for chunking
         T_eff = attn_full.size(1)
-        t_slices = self._get_t_slices(T_eff) if self._use_chunked_kl else [(0, T_eff)]
+        t_slices = self._get_t_slices(T_eff) if (
+            self._use_chunked_kl or self._use_subset_kl
+        ) else [(0, T_eff)]
 
         # In-place log-softmax (avoids large temp allocation)
         if self._use_chunked_kl:
@@ -333,10 +398,22 @@ class LensTrainer:
                     )
                     del tl
 
+        subset_chunks = None
+        if self._use_subset_kl:
+            subset_chunks = []
+            with torch.no_grad():
+                for t0, t1 in t_slices:
+                    subset_chunks.append(
+                        self.loss_fn.prepare_teacher_subset(
+                            teacher_logits_full[:, t0:t1, :].contiguous()
+                        )
+                    )
+
         raw_lens = lens.module if isinstance(lens, DDP) else lens
-        layer_ids = raw_lens.layer_ids if raw_lens.layer_ids else list(range(len(per_layer_acts)))
+        layer_ids = raw_lens.layer_ids if raw_lens.layer_ids else [site_id for site_id, _ in ordered_site_acts]
         n_layers = len(layer_ids)
         inv_layers = 1.0 / n_layers
+        site_map = dict(ordered_site_acts)
 
         total_loss = torch.zeros((), device=lens_device, dtype=torch.float32)
 
@@ -346,7 +423,7 @@ class LensTrainer:
         with micro_ctx:
             for li, layer_id in enumerate(layer_ids):
                 is_last_layer = (li == n_layers - 1)
-                h_full_raw = per_layer_acts[li]
+                h_full_raw = site_map[str(layer_id)]
 
                 # Move hidden states to lens device (model-parallel path)
                 if self.shard_state.enabled and h_full_raw.device != lens_device:
@@ -390,6 +467,8 @@ class LensTrainer:
                                 attn_full=attn_full,
                                 layer_id=layer_id,
                                 shift=shift,
+                                t_slices=t_slices,
+                                subset_chunks=subset_chunks,
                             )
                         else:
                             # Standard path (CE or non-chunked KL)
@@ -414,7 +493,7 @@ class LensTrainer:
                 del layer_loss, h_full_raw
 
 
-        del per_layer_acts, teacher_logits_full, attn_full, labels_full
+        del ordered_site_acts, site_map, teacher_logits_full, attn_full, labels_full, subset_chunks
 
         return total_loss
 
@@ -480,6 +559,8 @@ class LensTrainer:
         attn_full: torch.Tensor,
         layer_id,
         shift: int,
+        t_slices: List[Tuple[int, int]],
+        subset_chunks: Optional[List[dict]] = None,
     ) -> torch.Tensor:
         """
         Compute subset KL loss with T-chunking for memory efficiency.
@@ -498,19 +579,19 @@ class LensTrainer:
         else:
             h_full = h_full_raw
 
-        # Get T-dimension slices
-        T_eff = attn_full.size(1)
-        chunk_size = self.config.kl_chunk_size or 128
-        t_slices = [(t0, min(t0 + chunk_size, T_eff)) for t0 in range(0, T_eff, chunk_size)]
-
-        for t0, t1 in t_slices:
+        for chunk_idx, (t0, t1) in enumerate(t_slices):
             attn = attn_full[:, t0:t1].contiguous()
             if attn.sum().item() == 0:
                 continue
 
             # Only copy the chunk
             h = h_full[:, t0:t1, :].contiguous()
-            teacher_chunk = teacher_logits_full[:, t0:t1, :].contiguous()
+            teacher_subset = (
+                subset_chunks[chunk_idx] if subset_chunks is not None else None
+            )
+            teacher_chunk = None
+            if teacher_subset is None:
+                teacher_chunk = teacher_logits_full[:, t0:t1, :].contiguous()
 
             # Forward through SubsetKLLoss for this chunk
             chunk_loss = self.loss_fn.forward_with_lens(
@@ -519,6 +600,7 @@ class LensTrainer:
                 lens=lens,
                 layer=layer_id,
                 attention_mask=attn,
+                teacher_subset=teacher_subset,
             )
 
             # Accumulate (loss_fn returns mean, we want sum for proper averaging)
@@ -623,29 +705,197 @@ class LensTrainer:
         del lens_out, h
         return loss
 
+    def _write_run_config_csv(self) -> None:
+        activation_sites_path = self.config.output_dir / "activation_sites.csv"
+        self._write_activation_sites_csv(activation_sites_path)
+
+        subset_mode = self.config.subset_kl_mode if self.config.loss_type == "subset_kl" else ""
+        subset_k = self.config.subset_kl_k if self.config.loss_type == "subset_kl" else ""
+        subset_k_tail = self.config.subset_kl_k_tail if self.config.loss_type == "subset_kl" else ""
+        kl_chunk_size = self.config.kl_chunk_size if self.config.loss_type == "kl" else ""
+
+        config_path = self.config.output_dir / "run_config.csv"
+        with config_path.open("w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "model_name",
+                "lens_type",
+                "loss_type",
+                "loss_impl",
+                "lora_rank",
+                "lora_init",
+                "lora_init_calibration_tokens",
+                "lora_init_ridge_lambda",
+                "lora_init_ridge_lambda_scale",
+                "lora_init_stats_dtype",
+                "lora_init_jitter",
+                "lora_init_svd_metric",
+                "lora_init_normalization",
+                "subset_kl_mode",
+                "subset_kl_k",
+                "subset_kl_k_tail",
+                "kl_chunk_size",
+                "activation_site_preset",
+                "activation_site_count",
+                "activation_sites_file",
+                "batch_size",
+                "num_steps",
+                "warmup_steps",
+                "lr_schedule",
+                "min_lr_ratio",
+                "lr_init",
+                "tokens_per_step",
+                "max_seq_len",
+                "seed",
+                "output_dir",
+                "resume_checkpoint",
+                "resume_start_step",
+                "resume_target_step",
+            ])
+            writer.writerow([
+                self.config.model_name,
+                self.config.lens_type,
+                self.config.loss_type,
+                type(self.loss_fn).__name__,
+                self.config.lora_rank,
+                self.config.lora_init,
+                self.config.lora_init_calibration_tokens,
+                f"{self.config.lora_init_ridge_lambda:.10g}",
+                self.config.lora_init_ridge_lambda_scale,
+                self.config.lora_init_stats_dtype,
+                f"{self.config.lora_init_jitter:.10g}",
+                self.config.lora_init_svd_metric,
+                self.config.lora_init_normalization,
+                subset_mode,
+                subset_k,
+                subset_k_tail,
+                kl_chunk_size,
+                self.config.activation_site_preset,
+                self.activation_site_plan.site_count,
+                activation_sites_path.name,
+                self.config.per_gpu_batch_size,
+                self.config.num_steps,
+                self.config.warmup_steps,
+                self.config.lr_schedule,
+                f"{self.config.min_lr_ratio:.10g}",
+                f"{self.config.lr:.10g}",
+                self.config.tokens_per_step,
+                self.config.max_seq_len,
+                self.config.seed,
+                str(self.config.output_dir),
+                "" if self.config.resume_checkpoint is None else str(self.config.resume_checkpoint),
+                self.start_step,
+                self.end_step,
+            ])
+
+    def _write_activation_sites_csv(self, path) -> None:
+        with path.open("w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["site_id", "source_type", "source_ref"])
+            for site_id in self.activation_site_plan.site_ids:
+                if site_id in self.activation_site_plan.hidden_state_sources:
+                    writer.writerow([
+                        site_id,
+                        "hidden_state",
+                        self.activation_site_plan.hidden_state_sources[site_id],
+                    ])
+                    continue
+
+                custom_key = self.activation_site_plan.custom_sources[site_id]
+                writer.writerow([
+                    site_id,
+                    "custom_hook",
+                    self.activation_site_plan.custom_hooks.get(custom_key, custom_key),
+                ])
+
+    def _open_metrics_csv(self) -> None:
+        metrics_path = self.config.output_dir / "metrics.csv"
+        append_mode = self.start_step > 0 and metrics_path.exists() and metrics_path.stat().st_size > 0
+        mode = "a" if append_mode else "w"
+        self._metrics_file = metrics_path.open(mode, newline="")
+        self._metrics_writer = csv.writer(self._metrics_file)
+        if not append_mode:
+            self._metrics_writer.writerow([
+                "step",
+                "total_tokens",
+                "loss",
+                "tok_per_sec",
+                "dt_ms",
+                "microsteps",
+                "lr",
+                "peak_memory_gb",
+            ])
+        self._metrics_file.flush()
+
+    def _close_metrics_csv(self) -> None:
+        if self._metrics_file is not None:
+            self._metrics_file.close()
+            self._metrics_file = None
+            self._metrics_writer = None
+
     def _log_step(self, step, loss, tok_per_sec, dt, microsteps, optimizer):
         lr = optimizer.param_groups[0]["lr"]
-        msg = f"step {step}/{self.config.num_steps} | loss={loss:.4f} | tok/s={tok_per_sec:.0f} | dt={dt*1000:.0f}ms | micro={microsteps} | lr={lr:.2e}"
+        peak_mem_gb = ""
+        msg = f"step {step}/{self.end_step} | loss={loss:.4f} | tok/s={tok_per_sec:.0f} | dt={dt*1000:.0f}ms | micro={microsteps} | lr={lr:.2e}"
         if self.config.log_memory and self.ddp_state.device.type == "cuda":
             if self.shard_state.is_sharded:
                 # Report peak memory across all GPUs used by the model
-                total_mem = sum(
+                peak_mem_gb = sum(
                     torch.cuda.max_memory_allocated(i) for i in range(self.shard_state.num_gpus)
                 ) / 1e9
-                msg += f" | mem={total_mem:.1f}GB({self.shard_state.num_gpus}gpu)"
+                msg += f" | mem={peak_mem_gb:.1f}GB({self.shard_state.num_gpus}gpu)"
             else:
-                mem_gb = torch.cuda.max_memory_allocated(self.ddp_state.device) / 1e9
-                msg += f" | mem={mem_gb:.1f}GB"
+                peak_mem_gb = torch.cuda.max_memory_allocated(self.ddp_state.device) / 1e9
+                msg += f" | mem={peak_mem_gb:.1f}GB"
         logger.info(msg)
+        if self._metrics_writer is not None:
+            self._metrics_writer.writerow([
+                step,
+                self.total_tokens,
+                f"{loss:.8f}",
+                f"{tok_per_sec:.4f}",
+                f"{dt * 1000.0:.4f}",
+                microsteps,
+                f"{lr:.10g}",
+                "" if peak_mem_gb == "" else f"{peak_mem_gb:.4f}",
+            ])
+            self._metrics_file.flush()
 
     def _save_checkpoint(self, lens: nn.Module, step: int) -> None:
         raw_lens = lens.module if isinstance(lens, DDP) else lens
         path = self.config.output_dir / f"lens_step_{step}.pt"
-        torch.save({
+        checkpoint = {
             "step": step,
             "total_tokens": self.total_tokens,
             "config": self.config.to_dict(),
-            "lens_state_dict": raw_lens.state_dict(),
-        }, path)
-        logger.info(f"Saved checkpoint to {path}")
+            "lens_state_dict": raw_lens.checkpoint_state_dict(),
+        }
 
+        fd = None
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=self.config.output_dir,
+                prefix=f"{path.stem}.",
+                suffix=".tmp",
+            )
+            os.close(fd)
+            fd = None
+
+            # The legacy serialization path is more robust on some shared filesystems.
+            torch.save(checkpoint, tmp_path, _use_new_zipfile_serialization=False)
+
+            with open(tmp_path, "rb") as f:
+                os.fsync(f.fileno())
+
+            os.replace(tmp_path, path)
+        except Exception:
+            if fd is not None:
+                os.close(fd)
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except FileNotFoundError:
+                    pass
+            raise
+        logger.info(f"Saved checkpoint to {path}")

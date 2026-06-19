@@ -217,5 +217,3 @@ class TestFactory:
         with pytest.raises(ValueError):
             create_lens("unknown_lens")
 
-
-

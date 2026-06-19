@@ -1,4 +1,4 @@
-# LoRA Lens
+# LoRA Lens [WIP]
 
 **Scalable lens-based interpretability for large language models.**
 
@@ -32,7 +32,7 @@ loralens/
   model unwrapping. `loralens.hooks` is a thin re-export shim.
 
 - **subset-kl** provides the core KL math: `SubsetKLLoss`, `KLDivergenceLoss`,
-  `HajekKLLoss`, and functional APIs like `select_topk_indices` +
+  head/tail estimators, and functional APIs like `select_topk_indices` +
   `subset_kl_from_gathered`. `loralens.losses` wraps these with adapters that
   add the `labels` parameter for cross-entropy compatibility.
 

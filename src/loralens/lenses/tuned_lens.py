@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 
 from .base import BaseLens
-from .types import LayerId, canonical_layer_id
+from .types import LayerId, canonical_layer_id, module_safe_layer_key
 
 
 class TunedLens(BaseLens):
@@ -80,9 +80,12 @@ class TunedLens(BaseLens):
 
         # Create per-layer translators
         self._layer_ids = [canonical_layer_id(lid) for lid in layer_ids]
+        self._module_keys = {
+            lid: module_safe_layer_key(lid) for lid in self._layer_ids
+        }
 
         self.translators = nn.ModuleDict({
-            lid: nn.Linear(hidden_size, hidden_size, bias=bias)
+            self._module_keys[lid]: nn.Linear(hidden_size, hidden_size, bias=bias)
             for lid in self._layer_ids
         })
 
@@ -120,7 +123,8 @@ class TunedLens(BaseLens):
             raise ValueError("TunedLens requires a layer argument.")
 
         lid = canonical_layer_id(layer)
-        if lid not in self.translators:
+        module_key = self._module_keys.get(lid)
+        if module_key is None or module_key not in self.translators:
             raise KeyError(
                 f"Layer {layer!r} not found. Available: {self.layer_ids}"
             )
@@ -128,7 +132,7 @@ class TunedLens(BaseLens):
         batch, seq, hidden = activations.shape
 
         # Apply translator with residual connection
-        translator = self.translators[lid]
+        translator = self.translators[module_key]
         flat = activations.view(batch * seq, hidden)
         flat = flat + translator(flat)  # Residual
 
@@ -167,13 +171,14 @@ class TunedLens(BaseLens):
             raise ValueError("TunedLens requires a layer argument.")
 
         lid = canonical_layer_id(layer)
-        if lid not in self.translators:
+        module_key = self._module_keys.get(lid)
+        if module_key is None or module_key not in self.translators:
             raise KeyError(f"Layer {layer!r} not found.")
 
         batch, seq, hidden = activations.shape
 
         # Apply translator with residual
-        translator = self.translators[lid]
+        translator = self.translators[module_key]
         flat = activations.view(batch * seq, hidden)
         flat = flat + translator(flat)  # [B*T, d]
 
@@ -196,6 +201,12 @@ class TunedLens(BaseLens):
             if vocab_indices.dim() == 1:
                 return full_logits[..., vocab_indices]
             return torch.gather(full_logits, -1, vocab_indices)
+
+        # Layer norm commonly upcasts to fp32 for numerical stability.
+        # The indexed subset kernels require activations and unembed weights
+        # to have matching dtypes, so cast activations back here.
+        if flat.dtype != W.dtype:
+            flat = flat.to(W.dtype)
 
         # Efficient subset computation
         if vocab_indices.dim() == 1:
@@ -231,3 +242,86 @@ class TunedLens(BaseLens):
                 logits_flat = torch.gather(full_logits, dim=1, index=idx_flat.long())
 
             return logits_flat.view(batch, seq, k)
+
+    def compute_logits_subset_with_logsumexp(
+        self,
+        activations: torch.Tensor,
+        vocab_indices: torch.Tensor,
+        layer: Optional[LayerId] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute subset logits plus the full-vocab logsumexp without storing [N, V]."""
+        if layer is None:
+            raise ValueError("TunedLens requires a layer argument.")
+
+        lid = canonical_layer_id(layer)
+        module_key = self._module_keys.get(lid)
+        if module_key is None or module_key not in self.translators:
+            raise KeyError(f"Layer {layer!r} not found.")
+
+        batch, seq, hidden = activations.shape
+        translator = self.translators[module_key]
+        flat = activations.view(batch * seq, hidden)
+        flat = flat + translator(flat)
+
+        if hasattr(self.unembed, "layer_norm") and self.unembed.layer_norm is not None:
+            flat = self.unembed.layer_norm(flat)
+        elif hasattr(self.unembed, "ln_f") and self.unembed.ln_f is not None:
+            flat = self.unembed.ln_f(flat)
+
+        if hasattr(self.unembed, "lm_head"):
+            W = self.unembed.lm_head.weight
+            b = self.unembed.lm_head.bias
+        elif hasattr(self.unembed, "weight"):
+            W = self.unembed.weight
+            b = getattr(self.unembed, "bias", None)
+        else:
+            full_logits = self.unembed(flat).view(batch, seq, -1)
+            logsumexp = full_logits.float().logsumexp(dim=-1, keepdim=True)
+            if vocab_indices.dim() == 1:
+                subset_logits = full_logits[..., vocab_indices]
+            else:
+                subset_logits = torch.gather(full_logits, -1, vocab_indices)
+            return subset_logits, logsumexp
+
+        if flat.dtype != W.dtype:
+            flat = flat.to(W.dtype)
+
+        if vocab_indices.dim() == 1:
+            k = vocab_indices.shape[0]
+            W_subset = W[vocab_indices]
+            subset_flat = flat @ W_subset.T
+            if b is not None:
+                subset_flat = subset_flat + b[vocab_indices]
+            subset_logits = subset_flat.view(batch, seq, k)
+        else:
+            from loralens.ops import indexed_logits, indexed_logits_available
+
+            N = batch * seq
+            k = vocab_indices.shape[-1]
+            idx_flat = vocab_indices.view(N, k).contiguous()
+
+            if indexed_logits_available() and flat.is_cuda:
+                subset_flat = indexed_logits(
+                    H=flat.contiguous(),
+                    W=W.contiguous(),
+                    idx=idx_flat,
+                    bias=b,
+                )
+            else:
+                full_logits = flat @ W.T
+                if b is not None:
+                    full_logits = full_logits + b
+                subset_flat = torch.gather(full_logits, dim=1, index=idx_flat.long())
+            subset_logits = subset_flat.view(batch, seq, k)
+
+        vocab_chunk = 4096
+        logsumexp = None
+        for start in range(0, W.shape[0], vocab_chunk):
+            end = min(start + vocab_chunk, W.shape[0])
+            logits_chunk = flat @ W[start:end].T
+            if b is not None:
+                logits_chunk = logits_chunk + b[start:end]
+            chunk_logsumexp = logits_chunk.float().logsumexp(dim=-1, keepdim=True)
+            logsumexp = chunk_logsumexp if logsumexp is None else torch.logaddexp(logsumexp, chunk_logsumexp)
+
+        return subset_logits, logsumexp.view(batch, seq, 1)

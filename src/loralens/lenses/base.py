@@ -198,6 +198,49 @@ class BaseLens(nn.Module, ABC):
         """Number of trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
+    def checkpoint_state_dict(self) -> dict[str, torch.Tensor]:
+        """
+        State dict used for checkpoints.
+
+        By default this saves trainable parameters only. Frozen modules such as the
+        teacher unembed are reconstructed from the current model on resume.
+        """
+        full_state = self.state_dict()
+        trainable_names = {
+            name
+            for name, param in self.named_parameters()
+            if param.requires_grad
+        }
+        return {
+            name: full_state[name].detach().cpu()
+            for name in trainable_names
+        }
+
+    def load_checkpoint_state_dict(self, state_dict: dict[str, torch.Tensor]) -> None:
+        """
+        Load a checkpoint state dict.
+
+        Accepts both compact checkpoints that contain only trainable parameters and
+        older checkpoints that also included frozen unembed weights.
+        """
+        load_result = self.load_state_dict(state_dict, strict=False)
+        trainable_names = {
+            name
+            for name, param in self.named_parameters()
+            if param.requires_grad
+        }
+        missing_trainable = sorted(
+            name for name in load_result.missing_keys if name in trainable_names
+        )
+        if load_result.unexpected_keys:
+            raise ValueError(
+                f"Unexpected checkpoint keys: {sorted(load_result.unexpected_keys)}"
+            )
+        if missing_trainable:
+            raise ValueError(
+                f"Checkpoint missing trainable keys: {missing_trainable}"
+            )
+
     def __repr__(self) -> str:
         trainable = self.num_trainable_parameters()
         total = self.num_parameters()
