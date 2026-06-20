@@ -112,7 +112,7 @@ class TestSubsetKLLoss:
         loss_fn = SubsetKLLoss(k_head=50)
         assert loss_fn.k == 50
 
-    @pytest.mark.parametrize("mode", ["frankenstein", "hajek", "mc", "k2", "k3"])
+    @pytest.mark.parametrize("mode", ["mc", "k2", "k3"])
     def test_head_tail_modes_run(self, mode):
         batch, seq, vocab = 2, 4, 100
         student = torch.randn(batch, seq, vocab)
@@ -123,19 +123,6 @@ class TestSubsetKLLoss:
 
         assert loss.ndim == 0
         assert torch.isfinite(loss)
-
-    def test_hajek_matches_mc_with_teacher_tail_proposal(self):
-        batch, seq, vocab = 2, 4, 100
-        student = torch.randn(batch, seq, vocab)
-        teacher = torch.randn(batch, seq, vocab)
-        mask = torch.ones(batch, seq)
-
-        torch.manual_seed(123)
-        mc_loss = SubsetKLLoss(k=16, mode="mc", k_tail=8)(student, teacher, mask)
-        torch.manual_seed(123)
-        hajek_loss = SubsetKLLoss(k=16, mode="hajek", k_tail=8)(student, teacher, mask)
-
-        assert torch.allclose(hajek_loss, mc_loss)
 
 
 class TestCrossEntropyLoss:

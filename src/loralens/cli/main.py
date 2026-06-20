@@ -204,8 +204,6 @@ def train(args: argparse.Namespace) -> None:
         subset_kl_k=args.subset_kl_k,
         subset_kl_mode=args.subset_kl_mode,
         subset_kl_k_tail=args.subset_kl_k_tail,
-        subset_kl_tail_clip=args.subset_kl_tail_clip,
-        subset_kl_tail_oversample=args.subset_kl_tail_oversample,
         subset_kl_tail_proposal=args.subset_kl_tail_proposal,
         subset_kl_tail_proposal_alpha=args.subset_kl_tail_proposal_alpha,
         subset_kl_tail_proposal_tau=args.subset_kl_tail_proposal_tau,
@@ -226,9 +224,10 @@ def train(args: argparse.Namespace) -> None:
         log_every=args.log_every,
         save_every=args.save_every,
         save_initial_checkpoint=args.save_initial_checkpoint,
-        output_dir=Path(args.output_dir),
+        output_dir=Path(args.output_dir) if args.output_dir else Path("./checkpoints"),
         resume_checkpoint=Path(args.resume_checkpoint) if args.resume_checkpoint else None,
         seed=args.seed,
+        run_tag=args.run_tag if args.run_tag else None,
         # Model parallel
         model_parallel=args.model_parallel,
         model_dtype=args.model_dtype,
@@ -239,6 +238,12 @@ def train(args: argparse.Namespace) -> None:
         multinode_model_parallel=getattr(args, "multinode_model_parallel", False),
         fsdp_offload_to_cpu=getattr(args, "fsdp_offload_to_cpu", False),
     )
+
+    # Derive canonical output path when --output_dir was not explicitly set
+    if not args.output_dir:
+        base = Path(args.base_output_dir)
+        config.output_dir = base / config.canonical_run_path()
+        logger.info("Output dir (auto): %s", config.output_dir)
 
     # Validate: can't use both single-node and multi-node MP
     if config.model_parallel and config.multinode_model_parallel:
@@ -425,8 +430,6 @@ def train(args: argparse.Namespace) -> None:
             loss_kwargs["k"] = config.subset_kl_k
             loss_kwargs["mode"] = config.subset_kl_mode
             loss_kwargs["k_tail"] = config.subset_kl_k_tail
-            loss_kwargs["tail_clip"] = config.subset_kl_tail_clip
-            loss_kwargs["tail_oversample"] = config.subset_kl_tail_oversample
             loss_kwargs["tail_proposal"] = config.subset_kl_tail_proposal
             loss_kwargs["tail_proposal_alpha"] = config.subset_kl_tail_proposal_alpha
             loss_kwargs["tail_proposal_tau"] = config.subset_kl_tail_proposal_tau
@@ -631,7 +634,13 @@ def main() -> None:
         "--lora_init",
         choices=["default_lora", "mean_shift", "ridge_svd"],
         default="default_lora",
-        help="Optional data-driven initialization for LoRA translators.",
+        help=(
+            "LoRA translator initialization strategy. "
+            "default_lora: standard Kaiming init (no data needed). "
+            "mean_shift: shift B so B@A@h=0 at init, then train normally. "
+            "ridge_svd: fit ridge regression to calibration data, truncate to LoRA rank — "
+            "typically gives a much better starting loss."
+        ),
     )
     train_parser.add_argument(
         "--lora_init_calibration_tokens",
@@ -649,7 +658,12 @@ def main() -> None:
         "--lora_init_ridge_lambda_scale",
         choices=["trace_xxt_over_d", "absolute"],
         default="trace_xxt_over_d",
-        help="How to scale lora_init_ridge_lambda.",
+        help=(
+            "How to interpret lora_init_ridge_lambda. "
+            "trace_xxt_over_d: multiply lambda by the mean squared activation magnitude "
+            "(recommended — makes regularization scale-invariant across layers and models). "
+            "absolute: use lambda as-is."
+        ),
     )
     train_parser.add_argument(
         "--lora_init_stats_dtype",
@@ -679,7 +693,13 @@ def main() -> None:
         "--activation_site_preset",
         choices=["residual", "llama_expanded", "gpt2_expanded", "gpt2_attention"],
         default="residual",
-        help="Which intermediate activation sites to train lenses on.",
+        help=(
+            "Which hidden states to attach lenses to. "
+            "residual: one lens per post-attention + post-MLP residual site per layer (default, works on any model). "
+            "gpt2_expanded: also add pre-attention and pre-MLP sites (GPT-2 only). "
+            "llama_expanded: same but for LLaMA/Mistral architectures. "
+            "gpt2_attention: residual sites plus attention output (GPT-2 only)."
+        ),
     )
 
     # Loss
@@ -689,21 +709,24 @@ def main() -> None:
                               help="Number of top-k tokens for subset KL")
     train_parser.add_argument(
         "--subset_kl_mode",
-        choices=["topk", "frankenstein", "hajek", "mc", "k2", "k3"],
+        choices=["topk", "mc", "k2", "k3"],
         default="topk",
-        help="Subset KL estimator: simple top-k, Frankenstein, Hajek, MC, tail K2, or tail K3",
+        help=(
+            "Subset KL estimator. "
+            "topk: renormalize KL over top-k tokens only — fast, recommended default. "
+            "mc: exact KL on top-k head + importance-weighted MC estimate on the tail. "
+            "k2: top-k head KL + Schulman K2 squared-error tail penalty. "
+            "k3: top-k head KL + Schulman K3 tail estimator. "
+            "Use --subset_kl_k_tail > 0 to enable the tail term for mc/k2/k3."
+        ),
     )
     train_parser.add_argument("--subset_kl_k_tail", type=int, default=0,
-                              help="Number of tail samples for head/tail subset KL")
-    train_parser.add_argument("--subset_kl_tail_clip", type=float, default=50.0,
-                              help="Maximum importance weight for Frankenstein tail samples")
-    train_parser.add_argument("--subset_kl_tail_oversample", type=int, default=4,
-                              help="Oversample factor for Frankenstein tail PPS sampling")
+                              help="Number of tail samples per token for mc/k2/k3 modes (0 = head only)")
     train_parser.add_argument(
         "--subset_kl_tail_proposal",
         choices=["target", "teacher", "mixed", "tempered"],
         default="target",
-        help="Tail proposal for MC/Hajek/K2/K3 modes; target preserves existing behavior",
+        help="Proposal distribution for tail sampling in mc/k2/k3 modes. target uses the teacher distribution.",
     )
     train_parser.add_argument("--subset_kl_tail_proposal_alpha", type=float, default=0.8,
                               help="Target mixture weight for mixed tail proposal")
@@ -713,9 +736,17 @@ def main() -> None:
                               help="Per-position candidates for shared subset KL")
     train_parser.add_argument("--shared_subset_max_K", type=int, default=512,
                               help="Max shared candidate set size")
-    train_parser.add_argument("--token_shift", type=int, default=None,
-                              help="Shift labels/logits by this many tokens. "
-                                   "Defaults to 0 for KL losses and 1 for CE.")
+    train_parser.add_argument(
+        "--token_shift",
+        type=int,
+        default=None,
+        help=(
+            "Token offset between teacher logits and target labels. "
+            "0: teacher and student see the same position (KL distillation). "
+            "1: predict position i+1's token from position i's hidden state (CE). "
+            "Defaults to 0 for kl/subset_kl/shared_subset_kl and 1 for ce."
+        ),
+    )
 
     # Training
     train_parser.add_argument("--max_seq_len", type=int, default=1024)
@@ -764,7 +795,33 @@ def main() -> None:
         default=False,
         help="Save lens_step_0.pt after optional initialization and before optimizer steps.",
     )
-    train_parser.add_argument("--output_dir", type=str, default="./checkpoints")
+    train_parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help=(
+            "Explicit output directory for checkpoints and logs. "
+            "When omitted, a canonical path is derived from the run's attributes and "
+            "placed under --base_output_dir: "
+            "{model}/{lens}/{loss}/{sites}/{init}/{tag}"
+        ),
+    )
+    train_parser.add_argument(
+        "--base_output_dir",
+        type=str,
+        default="./checkpoints",
+        help="Root directory for auto-derived canonical output paths (default: ./checkpoints).",
+    )
+    train_parser.add_argument(
+        "--run_tag",
+        type=str,
+        default=None,
+        help=(
+            "Short label appended to the canonical output path (last component). "
+            "Useful for distinguishing ablations with identical structural config. "
+            "Defaults to seed{seed} when omitted."
+        ),
+    )
     train_parser.add_argument(
         "--resume_checkpoint",
         type=str,

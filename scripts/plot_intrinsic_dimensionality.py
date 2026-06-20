@@ -6,10 +6,7 @@ import csv
 from pathlib import Path
 
 
-DEFAULT_ANALYSIS_DIR = Path(
-    "/eagle/projects/ModCon/jpettyjohn/loralens-refactored/analysis/"
-    "intrinsic_dimensionality"
-)
+DEFAULT_ANALYSIS_DIR = None
 
 
 def parse_args():

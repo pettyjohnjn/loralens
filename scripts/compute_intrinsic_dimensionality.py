@@ -19,18 +19,9 @@ from typing import Any, Dict, Iterable, List, Tuple
 import torch
 
 
-DEFAULT_GPT2_DIR = Path(
-    "/eagle/projects/ModCon/jpettyjohn/loralens-refactored/src/checkpoints/"
-    "gpt2/gpt2_preemptable_sweep_1000/tuned_kl_baseline"
-)
-DEFAULT_LLAMA3_8B_DIR = Path(
-    "/eagle/projects/ModCon/jpettyjohn/loralens-refactored/src/checkpoints/"
-    "llama3_8b/llama3_8b_tuned_kl_10node_debug_scaling"
-)
-DEFAULT_OUTPUT_DIR = Path(
-    "/eagle/projects/ModCon/jpettyjohn/loralens-refactored/analysis/"
-    "intrinsic_dimensionality"
-)
+DEFAULT_GPT2_DIR = None
+DEFAULT_LLAMA3_8B_DIR = None
+DEFAULT_OUTPUT_DIR = None
 
 
 class ModelSpec:

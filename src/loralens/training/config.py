@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -59,10 +60,8 @@ class TrainConfig:
     loss_type: Literal["kl", "subset_kl", "shared_subset_kl", "ce"] = "kl"
     kl_chunk_size: Optional[int] = 128
     subset_kl_k: int = 128  # Top-k tokens for subset KL
-    subset_kl_mode: Literal["topk", "frankenstein", "hajek", "mc", "k2", "k3"] = "topk"
+    subset_kl_mode: Literal["topk", "mc", "k2", "k3"] = "topk"
     subset_kl_k_tail: int = 0  # Tail samples for head/tail subset KL
-    subset_kl_tail_clip: float = 50.0  # Max importance weight for Frankenstein mode
-    subset_kl_tail_oversample: int = 4  # PPS oversample factor for Frankenstein mode
     subset_kl_tail_proposal: Literal["target", "teacher", "mixed", "tempered"] = "target"
     subset_kl_tail_proposal_alpha: float = 0.8
     subset_kl_tail_proposal_tau: float = 0.7
@@ -117,6 +116,7 @@ class TrainConfig:
 
     # Misc
     seed: int = 0
+    run_tag: Optional[str] = None  # Short label appended to canonical path (e.g., "ablation1")
 
     def __post_init__(self):
         """Validate and set defaults."""
@@ -133,6 +133,63 @@ class TrainConfig:
         if self.resume_checkpoint is not None:
             self.resume_checkpoint = Path(self.resume_checkpoint)
 
+    def canonical_run_path(self) -> Path:
+        """
+        Return a canonical relative path for this run, derived from its attributes.
+
+        Intended as a subdirectory under a base checkpoints root::
+
+            output_dir = Path("./checkpoints") / config.canonical_run_path()
+
+        The hierarchy is::
+
+            {model}/{lens}/{loss}/{sites}/{init}/{tag}
+
+        where ``{init}`` is omitted for non-LoRA lens types and ``{tag}`` is
+        either the ``run_tag`` field or ``seed{seed}`` when ``run_tag`` is None.
+        """
+        # Model: last path component of HF name, lower-cased and slug-ified
+        model_slug = self.model_name.split("/")[-1].lower()
+        model_slug = re.sub(r"[^a-z0-9]+", "-", model_slug).strip("-")
+
+        # Lens
+        if self.lens_type == "lora":
+            lens_slug = f"lora-r{self.lora_rank}"
+        else:
+            lens_slug = self.lens_type  # "tuned" or "logit"
+
+        # Loss
+        if self.loss_type == "subset_kl":
+            loss_slug = f"subset_kl-{self.subset_kl_mode}-k{self.subset_kl_k}"
+            if self.subset_kl_k_tail > 0:
+                loss_slug += f"-tail{self.subset_kl_k_tail}"
+        elif self.loss_type == "shared_subset_kl":
+            loss_slug = f"shared_kl-m{self.shared_subset_top_m}-K{self.shared_subset_max_K}"
+        else:
+            loss_slug = self.loss_type  # "kl" or "ce"
+
+        # Activation sites
+        site_slug = self.activation_site_preset
+
+        parts: list[str] = [model_slug, lens_slug, loss_slug, site_slug]
+
+        # LoRA initialization strategy
+        if self.lens_type == "lora":
+            init_map = {
+                "default_lora": "init-default",
+                "mean_shift": "init-mean_shift",
+                "ridge_svd": "init-ridge",
+            }
+            parts.append(init_map.get(self.lora_init, f"init-{self.lora_init}"))
+
+        # Run tag: user-provided label or auto-generated from seed
+        parts.append(self.run_tag if self.run_tag else f"seed{self.seed}")
+
+        result = Path(parts[0])
+        for p in parts[1:]:
+            result = result / p
+        return result
+
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
         d = {}
@@ -147,7 +204,10 @@ class TrainConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "TrainConfig":
-        """Create from dictionary."""
+        """Create from dictionary, ignoring unrecognised keys for forward/backward compat."""
+        import dataclasses
+        known = {f.name for f in dataclasses.fields(cls)}
+        d = {k: v for k, v in d.items() if k in known}
         if "output_dir" in d:
             d["output_dir"] = Path(d["output_dir"])
         if d.get("resume_checkpoint") is not None:

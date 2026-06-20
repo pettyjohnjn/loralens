@@ -35,11 +35,7 @@ from .factory import create_loss, register_loss, list_losses
 # Advanced sampling utilities (re-exported from subset_kl)
 from .sampling import (
     pps_sample_indices_batched,
-    frankenstein_kl_estimate,
-    hajek_kl_estimate,
-    subset_hajek_kl_from_gathered,
     subset_mc_kl_from_gathered,
-    head_tail_kl,
     SamplingDiagnostics,
 )
 
@@ -56,10 +52,6 @@ __all__ = [
     "list_losses",
     # Sampling utilities (advanced)
     "pps_sample_indices_batched",
-    "frankenstein_kl_estimate",
-    "hajek_kl_estimate",
-    "subset_hajek_kl_from_gathered",
     "subset_mc_kl_from_gathered",
-    "head_tail_kl",
     "SamplingDiagnostics",
 ]

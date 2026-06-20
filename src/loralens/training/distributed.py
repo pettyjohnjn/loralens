@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -49,32 +52,31 @@ def init_ddp(backend: str = "nccl", enabled: bool = True) -> DDPState:
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
 
-    print(
-        "[ddp] host=%s rank=%s local_rank=%s world_size=%s "
-        "cuda_visible_devices=%s"
-        % (
-            socket.gethostname(),
-            rank,
-            local_rank,
-            world_size,
-            os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"),
-        ),
-        flush=True,
+    logger.info(
+        "[ddp] host=%s rank=%s local_rank=%s world_size=%s cuda_visible_devices=%s",
+        socket.gethostname(),
+        rank,
+        local_rank,
+        world_size,
+        os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"),
     )
 
     if torch.cuda.is_available():
-        print(
-            "[ddp] host=%s torch.cuda.device_count=%s before set_device"
-            % (socket.gethostname(), torch.cuda.device_count()),
-            flush=True,
+        logger.info(
+            "[ddp] host=%s torch.cuda.device_count=%s before set_device",
+            socket.gethostname(),
+            torch.cuda.device_count(),
         )
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
         free_mem, total_mem = torch.cuda.mem_get_info(device)
-        print(
-            "[ddp] host=%s rank=%s using device=%s free_mem=%s total_mem=%s"
-            % (socket.gethostname(), rank, device, free_mem, total_mem),
-            flush=True,
+        logger.info(
+            "[ddp] host=%s rank=%s using device=%s free_mem=%s total_mem=%s",
+            socket.gethostname(),
+            rank,
+            device,
+            free_mem,
+            total_mem,
         )
     else:
         device = torch.device("cpu")
