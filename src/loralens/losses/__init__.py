@@ -35,7 +35,6 @@ from .factory import create_loss, register_loss, list_losses
 # Advanced sampling utilities (re-exported from subset_kl)
 from .sampling import (
     pps_sample_indices_batched,
-    subset_mc_kl_from_gathered,
     SamplingDiagnostics,
 )
 
@@ -52,6 +51,5 @@ __all__ = [
     "list_losses",
     # Sampling utilities (advanced)
     "pps_sample_indices_batched",
-    "subset_mc_kl_from_gathered",
     "SamplingDiagnostics",
 ]
