@@ -1,0 +1,76 @@
+#!/bin/bash
+#PBS -N loralens_llama3_8b_mc_expanded
+#PBS -l select=10:ncpus=32:ngpus=4
+#PBS -l walltime=01:00:00
+#PBS -q debug-scaling
+#PBS -l filesystems=home:grand:eagle
+#PBS -A ModCon
+
+REPO=/lus/eagle/projects/ModCon/jpettyjohn/loralens-refactored
+MODEL=/grand/SuperBERT/aswathy/models/models--meta-llama--Meta-Llama-3-8B-Instruct
+CKPT_BASE=$REPO/src/checkpoints
+
+# ── Node topology ─────────────────────────────────────────────────────────────
+MASTER_ADDR=$(head -1 $PBS_NODEFILE)
+NNODES=$(sort -u $PBS_NODEFILE | wc -l)
+NGPUS_PER_NODE=4
+MASTER_PORT=29500
+
+echo "Nodes: $NNODES  |  GPUs/node: $NGPUS_PER_NODE  |  Master: $MASTER_ADDR:$MASTER_PORT"
+
+# ── Environment preload (runs on every node via ssh) ─────────────────────────
+PRELOAD="module use /soft/modulefiles; module load conda; conda activate LoRA_Lens; "
+PRELOAD+="source ~/.hf_env; "
+PRELOAD+="export TOKENIZERS_PARALLELISM=false; "
+PRELOAD+="export OMP_NUM_THREADS=8; "
+
+# ── torchrun launcher ─────────────────────────────────────────────────────────
+LAUNCHER="python -m torch.distributed.run "
+LAUNCHER+="--nnodes=$NNODES --nproc_per_node=$NGPUS_PER_NODE --max_restarts 0 "
+LAUNCHER+="--rdzv_backend=c10d --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} "
+
+# ── Training command ──────────────────────────────────────────────────────────
+CMD="-m loralens.cli train "
+CMD+="--model_name $MODEL "
+CMD+="--multinode_model_parallel "
+CMD+="--model_dtype bf16 "
+CMD+="--attn_implementation flash_attention_2 "
+CMD+="--lens_type lora "
+CMD+="--lora_rank 64 "
+CMD+="--lora_init default_lora "
+CMD+="--loss_type subset_kl "
+CMD+="--subset_kl_mode mc "
+CMD+="--subset_kl_k 512 "
+CMD+="--subset_kl_k_tail 1024 "
+CMD+="--activation_site_preset llama_expanded "
+CMD+="--data_source pile "
+CMD+="--max_seq_len 1024 "
+CMD+="--per_gpu_batch_size 2 "
+CMD+="--tokens_per_step 262144 "
+CMD+="--num_steps 200 "
+CMD+="--lr 1e-3 "
+CMD+="--warmup_steps 10 "
+CMD+="--lr_schedule cosine "
+CMD+="--grad_clip_norm 1.0 "
+CMD+="--amp_enabled "
+CMD+="--amp_dtype bf16 "
+CMD+="--save_every 50 "
+CMD+="--log_every 5 "
+CMD+="--base_output_dir $CKPT_BASE "
+
+# ── Launch on every node ──────────────────────────────────────────────────────
+RANK=0
+for NODE in $(sort -u $PBS_NODEFILE); do
+    NODE_RANK="--node_rank=$RANK"
+    FULL_CMD="cd $REPO && $PRELOAD $LAUNCHER $NODE_RANK $CMD"
+    echo "Launching rank $RANK on $NODE"
+    if [[ "$NODE" == "$HOSTNAME" ]]; then
+        eval $FULL_CMD &
+    else
+        ssh "$NODE" "$FULL_CMD" &
+    fi
+    RANK=$((RANK + 1))
+done
+
+wait
+echo "All ranks finished."
