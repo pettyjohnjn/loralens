@@ -20,11 +20,13 @@ export OMP_NUM_THREADS=8
 
 echo "Node: $(hostname)  |  GPUs: $(nvidia-smi -L | wc -l)"
 
-# Single-node model parallel: device_map shards teacher across all 4 GPUs,
-# lens runs on cuda:0. Single process — no torchrun needed.
-python -m loralens.cli.main train \
+# DDP across 4 GPUs: LLaMA 8B in bf16 = 16GB, fits on one A100 40GB.
+# Each rank holds its own teacher copy + lens slice — 4x lens parallelism
+# vs model_parallel which runs all lens sites on a single GPU.
+python -m torch.distributed.run \
+    --nnodes=1 --nproc_per_node=4 --standalone \
+    -m loralens.cli.main train \
     --model_name $MODEL \
-    --model_parallel \
     --model_dtype bf16 \
     --lens_type lora \
     --lora_rank 64 \
