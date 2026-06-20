@@ -125,18 +125,32 @@ class HFUnembed(nn.Module):
         return f"HFUnembed(vocab_size={self.vocab_size}, has_layer_norm={has_ln})"
 
     def clone_to_device(self, device: torch.device) -> "HFUnembed":
-        """Create a standalone copy of the unembed weights on *device*."""
+        """Create a standalone copy of the unembed weights on *device*.
+
+        deepcopy also copies Accelerate device-dispatch hooks that device_map
+        attaches to each submodule. Those hooks re-route tensors to the original
+        GPU (e.g. cuda:3), breaking the cloned module on a different device.
+        We strip them after copying.
+        """
         import copy
+
+        def _strip_hooks(module: nn.Module) -> nn.Module:
+            try:
+                from accelerate.hooks import remove_hook_from_module
+                remove_hook_from_module(module, recurse=True)
+            except Exception:
+                pass
+            return module
 
         clone = object.__new__(HFUnembed)
         nn.Module.__init__(clone)
 
         if self.layer_norm is not None:
-            clone.layer_norm = copy.deepcopy(self.layer_norm).to(device)
+            clone.layer_norm = _strip_hooks(copy.deepcopy(self.layer_norm)).to(device)
         else:
             clone.layer_norm = None
 
-        clone.lm_head = copy.deepcopy(self.lm_head).to(device)
+        clone.lm_head = _strip_hooks(copy.deepcopy(self.lm_head)).to(device)
         clone.vocab_size = self.vocab_size
 
         for p in clone.parameters():
