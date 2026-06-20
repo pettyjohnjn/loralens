@@ -1,0 +1,51 @@
+#!/bin/bash
+#PBS -N loralens_llama3_8b_1node
+#PBS -l select=1:ncpus=32:ngpus=4
+#PBS -l walltime=01:00:00
+#PBS -q debug
+#PBS -l filesystems=home:grand:eagle
+#PBS -A ModCon
+
+REPO=/lus/eagle/projects/ModCon/jpettyjohn/loralens-refactored
+MODEL=/grand/SuperBERT/aswathy/models/models--meta-llama--Meta-Llama-3-8B-Instruct
+CKPT_BASE=$REPO/src/checkpoints
+
+module use /soft/modulefiles
+module load conda
+conda activate LoRA_Lens
+source ~/.hf_env
+export PYTHONPATH=$REPO/src:$PYTHONPATH
+export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS=8
+
+echo "Node: $(hostname)  |  GPUs: $(nvidia-smi -L | wc -l)"
+
+# Single-node model parallel: device_map shards teacher across all 4 GPUs,
+# lens runs on cuda:0. Single process — no torchrun needed.
+python -m loralens.cli.main train \
+    --model_name $MODEL \
+    --model_parallel \
+    --model_dtype bf16 \
+    --lens_type lora \
+    --lora_rank 64 \
+    --lora_init default_lora \
+    --loss_type subset_kl \
+    --subset_kl_mode mc \
+    --subset_kl_k 512 \
+    --subset_kl_k_tail 1024 \
+    --activation_site_preset llama_expanded \
+    --data_source pile \
+    --max_seq_len 1024 \
+    --batch_size 2 \
+    --tokens_per_step 65536 \
+    --num_steps 50 \
+    --lr 1e-3 \
+    --warmup_steps 5 \
+    --lr_schedule cosine \
+    --amp \
+    --amp_dtype bf16 \
+    --save_every 25 \
+    --log_every 5 \
+    --base_output_dir $CKPT_BASE
+
+echo "Done."
