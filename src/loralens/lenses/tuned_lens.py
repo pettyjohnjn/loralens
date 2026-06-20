@@ -249,7 +249,11 @@ class TunedLens(BaseLens):
         vocab_indices: torch.Tensor,
         layer: Optional[LayerId] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute subset logits plus the full-vocab logsumexp without storing [N, V]."""
+        """Compute subset logits plus the full-vocab logsumexp.
+
+        One large matmul (H @ W.T) for both logsumexp and subset gather —
+        faster than a chunked loop due to better CUBLAS utilization.
+        """
         if layer is None:
             raise ValueError("TunedLens requires a layer argument.")
 
@@ -286,42 +290,21 @@ class TunedLens(BaseLens):
         if flat.dtype != W.dtype:
             flat = flat.to(W.dtype)
 
+        N = batch * seq
+
+        full_logits = flat @ W.T  # [N, V]
+        if b is not None:
+            full_logits = full_logits + b
+
+        logsumexp = full_logits.float().logsumexp(dim=-1, keepdim=True)  # [N, 1]
+
         if vocab_indices.dim() == 1:
             k = vocab_indices.shape[0]
-            W_subset = W[vocab_indices]
-            subset_flat = flat @ W_subset.T
-            if b is not None:
-                subset_flat = subset_flat + b[vocab_indices]
-            subset_logits = subset_flat.view(batch, seq, k)
+            subset_logits = full_logits[:, vocab_indices].view(batch, seq, k)
         else:
-            from loralens.ops import indexed_logits, indexed_logits_available
-
-            N = batch * seq
             k = vocab_indices.shape[-1]
             idx_flat = vocab_indices.view(N, k).contiguous()
-
-            if indexed_logits_available() and flat.is_cuda:
-                subset_flat = indexed_logits(
-                    H=flat.contiguous(),
-                    W=W.contiguous(),
-                    idx=idx_flat,
-                    bias=b,
-                )
-            else:
-                full_logits = flat @ W.T
-                if b is not None:
-                    full_logits = full_logits + b
-                subset_flat = torch.gather(full_logits, dim=1, index=idx_flat.long())
+            subset_flat = torch.gather(full_logits, dim=1, index=idx_flat.long())
             subset_logits = subset_flat.view(batch, seq, k)
-
-        vocab_chunk = 4096
-        logsumexp = None
-        for start in range(0, W.shape[0], vocab_chunk):
-            end = min(start + vocab_chunk, W.shape[0])
-            logits_chunk = flat @ W[start:end].T
-            if b is not None:
-                logits_chunk = logits_chunk + b[start:end]
-            chunk_logsumexp = logits_chunk.float().logsumexp(dim=-1, keepdim=True)
-            logsumexp = chunk_logsumexp if logsumexp is None else torch.logaddexp(logsumexp, chunk_logsumexp)
 
         return subset_logits, logsumexp.view(batch, seq, 1)

@@ -328,7 +328,13 @@ class LoRALens(BaseLens):
         vocab_indices: torch.Tensor,
         layer: Optional[LayerId] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute subset logits plus the full-vocab logsumexp without storing [N, V]."""
+        """Compute subset logits plus the full-vocab logsumexp.
+
+        One large matmul (H @ W.T) is used for both the logsumexp and the
+        subset gather. This is faster than a chunked logsumexp loop because
+        CUBLAS amortizes launch overhead over a single large kernel.
+        Memory: O(N * V) ~ 400-530 MB for typical configs; fine with layer-wise backward.
+        """
         if layer is None:
             raise ValueError("LoRALens requires a layer argument.")
 
@@ -338,8 +344,9 @@ class LoRALens(BaseLens):
             raise KeyError(f"Layer {layer!r} not found.")
 
         batch, seq, hidden = activations.shape
+        N = batch * seq
         proj = self.projections[module_key]
-        flat = activations.view(batch * seq, hidden)
+        flat = activations.view(N, hidden)
         flat = proj(flat)
 
         if hasattr(self.unembed, "layer_norm") and self.unembed.layer_norm is not None:
@@ -368,43 +375,22 @@ class LoRALens(BaseLens):
         if flat.dtype != W.dtype:
             flat = flat.to(W.dtype)
 
+        # Single matmul over the full vocab — one large CUBLAS call is much
+        # faster than 13-32 serial chunked matmuls for the logsumexp.
+        full_logits = flat @ W.T  # [N, V]
+        if b is not None:
+            full_logits = full_logits + b
+
+        logsumexp = full_logits.float().logsumexp(dim=-1, keepdim=True)  # [N, 1]
+
         if vocab_indices.dim() == 1:
             k = vocab_indices.shape[0]
-            W_subset = W[vocab_indices]
-            subset_flat = flat @ W_subset.T
-            if b is not None:
-                subset_flat = subset_flat + b[vocab_indices]
-            subset_logits = subset_flat.view(batch, seq, k)
+            subset_logits = full_logits[:, vocab_indices].view(batch, seq, k)
         else:
-            from loralens.ops import indexed_logits, indexed_logits_available
-
-            N = batch * seq
             k = vocab_indices.shape[-1]
             idx_flat = vocab_indices.view(N, k).contiguous()
-
-            if indexed_logits_available() and flat.is_cuda:
-                subset_flat = indexed_logits(
-                    H=flat.contiguous(),
-                    W=W.contiguous(),
-                    idx=idx_flat,
-                    bias=b,
-                )
-            else:
-                full_logits = flat @ W.T
-                if b is not None:
-                    full_logits = full_logits + b
-                subset_flat = torch.gather(full_logits, dim=1, index=idx_flat.long())
+            subset_flat = torch.gather(full_logits, dim=1, index=idx_flat.long())
             subset_logits = subset_flat.view(batch, seq, k)
-
-        vocab_chunk = 4096
-        logsumexp = None
-        for start in range(0, W.shape[0], vocab_chunk):
-            end = min(start + vocab_chunk, W.shape[0])
-            logits_chunk = flat @ W[start:end].T
-            if b is not None:
-                logits_chunk = logits_chunk + b[start:end]
-            chunk_logsumexp = logits_chunk.float().logsumexp(dim=-1, keepdim=True)
-            logsumexp = chunk_logsumexp if logsumexp is None else torch.logaddexp(logsumexp, chunk_logsumexp)
 
         return subset_logits, logsumexp.view(batch, seq, 1)
 
