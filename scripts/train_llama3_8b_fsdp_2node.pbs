@@ -2,7 +2,7 @@
 #PBS -N loralens_llama3_8b_fsdp_2node
 #PBS -l select=2:ncpus=32:ngpus=4
 #PBS -l walltime=01:00:00
-#PBS -q debug-scaling
+#PBS -q debug
 #PBS -l filesystems=home:grand:eagle
 #PBS -A ModCon
 
