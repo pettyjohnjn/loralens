@@ -32,12 +32,6 @@ from .shared_subset_kl import SharedSubsetKLLoss
 from .cross_entropy import CrossEntropyLoss
 from .factory import create_loss, register_loss, list_losses
 
-# Advanced sampling utilities (re-exported from subset_kl)
-from .sampling import (
-    pps_sample_indices_batched,
-    SamplingDiagnostics,
-)
-
 __all__ = [
     # Core losses
     "BaseLoss",
@@ -49,7 +43,4 @@ __all__ = [
     "create_loss",
     "register_loss",
     "list_losses",
-    # Sampling utilities (advanced)
-    "pps_sample_indices_batched",
-    "SamplingDiagnostics",
 ]

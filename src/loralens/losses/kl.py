@@ -29,8 +29,6 @@ class KLDivergenceLoss(BaseLoss):
     ----------
     reduction : str
         How to reduce: "none", "mean", or "sum".
-    temperature : float
-        Temperature for softmax (1.0 = no scaling).
     chunk_size : Optional[int]
         If set, compute KL in chunks along sequence dimension
         to reduce peak memory usage.
@@ -39,15 +37,12 @@ class KLDivergenceLoss(BaseLoss):
     def __init__(
         self,
         reduction: ReductionType = "mean",
-        temperature: float = 1.0,
         chunk_size: Optional[int] = None,
     ) -> None:
         super().__init__(reduction=reduction)
-        self.temperature = temperature
         self.chunk_size = chunk_size
         self._inner = _ExternalKL(
             reduction=reduction,
-            temperature=temperature,
             chunk_size=chunk_size,
         )
 
@@ -66,7 +61,4 @@ class KLDivergenceLoss(BaseLoss):
         return self._inner.forward(student_logits, teacher_logits, attention_mask)
 
     def __repr__(self) -> str:
-        return (
-            f"KLDivergenceLoss(reduction={self.reduction!r}, "
-            f"temperature={self.temperature}, chunk_size={self.chunk_size})"
-        )
+        return f"KLDivergenceLoss(reduction={self.reduction!r}, chunk_size={self.chunk_size})"
