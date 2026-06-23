@@ -57,7 +57,7 @@ class TrainConfig:
     ] = "residual"
 
     # Write loss (bidirectional training, only active when lens_type="bidir_lora")
-    write_loss_type: Literal["none", "ortho", "suffix", "both"] = "none"
+    write_loss_type: Literal["none", "ortho"] = "none"
     write_loss_weight: float = 0.1
 
     # Loss

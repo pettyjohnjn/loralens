@@ -632,16 +632,13 @@ def main() -> None:
     )
     train_parser.add_argument(
         "--write_loss_type",
-        choices=["none", "ortho", "suffix", "both"],
+        choices=["none", "ortho"],
         default="none",
         help=(
             "Bidirectional write loss (only active with --lens_type bidir_lora). "
             "none: read-only training (identical to lora). "
             "ortho: add ||h - h@M.T@M||^2 penalty to encourage M to be orthogonal "
-            "(transpose ≈ inverse, cheap). "
-            "suffix: inject write encoding at a random resid_post site and run the model "
-            "suffix to compute CE loss (directly trains write effectiveness, ~2x cost). "
-            "both: apply both ortho and suffix losses simultaneously."
+            "(transpose ≈ inverse, cheap)."
         ),
     )
     train_parser.add_argument(
