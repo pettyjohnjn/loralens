@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
+import random
 import tempfile
 import time
 from contextlib import nullcontext
@@ -474,8 +475,8 @@ class LensTrainer:
                                 shift=shift,
                             )
 
-                        # Orthogonality penalty (free alongside the read loss)
-                        if write_type == "ortho":
+                        # Approach A: orthogonality penalty (free alongside read loss)
+                        if write_type in ("ortho", "both"):
                             if shift > 0:
                                 h_for_ortho = h_full_raw[:, :-shift, :]
                             else:
@@ -495,6 +496,26 @@ class LensTrainer:
 
                 del layer_loss, h_full_raw
 
+
+        # Approach B: suffix write loss (one randomly sampled resid_post site per step)
+        if write_type in ("suffix", "both"):
+            resid_sites = [str(lid) for lid in layer_ids if str(lid).endswith(".resid_post")]
+            # Use the lens device tensors (input_ids_model may be deleted in sharded path).
+            _ids  = input_ids.to(_get_model_input_device(self.model)) if self.shard_state.enabled else input_ids
+            _attn = attention_mask.to(_get_model_input_device(self.model)) if self.shard_state.enabled else attention_mask
+            with amp_ctx.autocast():
+                suffix_loss = self._compute_write_suffix_loss(
+                    raw_lens=raw_lens,
+                    input_ids=_ids,
+                    attention_mask=_attn,
+                    resid_site_ids=resid_sites,
+                )
+                suffix_loss = suffix_loss * write_weight * scale
+                total_loss = total_loss + suffix_loss.detach()
+
+            micro_ctx2 = lens.no_sync() if (is_ddp and not should_sync) else nullcontext()
+            with micro_ctx2:
+                amp_ctx.scale(suffix_loss).backward()
 
         del ordered_site_acts, site_map, teacher_logits_full, attn_full, labels_full, subset_chunks
 
@@ -642,6 +663,85 @@ class LensTrainer:
         )
 
         del lens_out, h
+        return loss
+
+    def _compute_write_suffix_loss(
+        self,
+        raw_lens: BidirLoRALens,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        resid_site_ids: List[str],
+    ) -> torch.Tensor:
+        """
+        Approach B: inject the write encoding for a target token at one randomly
+        chosen resid_post site, run the model, and return the CE loss.
+
+        Target: the token at a random non-final position (so the shifted next-token
+        is in the sequence).  The injection is added at position p-1 of the chosen
+        transformer block's output; we then measure the CE loss at position p-1
+        predicting input_ids[:, p].
+
+        Gradients flow through raw_lens.compute_write_injection → lora weights.
+        Model weights are frozen so no gradients propagate into them.
+
+        Returns a scalar CE loss (unweighted — caller applies write_loss_weight).
+        """
+        if not resid_site_ids:
+            return torch.zeros((), device=self._lens_device, dtype=torch.float32)
+
+        seq_len = input_ids.shape[1]
+        if seq_len < 2:
+            return torch.zeros((), device=self._lens_device, dtype=torch.float32)
+
+        # Pick one resid_post site at random for this step.
+        site_id   = random.choice(resid_site_ids)
+        layer_idx = int(str(site_id)[1:3])   # "L05.resid_post" → 5
+
+        # Pick a random target position p in [1, seq_len-1].
+        # We inject at position p-1, predict input_ids[:, p] from position p-1.
+        p = random.randint(1, seq_len - 1)
+        target_tokens = input_ids[:, p]   # [batch]
+
+        # One-hot encode the target tokens.
+        vocab_size  = raw_lens.vocab_size
+        target_onehot = F.one_hot(target_tokens, num_classes=vocab_size).float()  # [batch, V]
+        target_onehot = target_onehot.to(self._lens_device)
+
+        # Compute write injection vector (differentiable through lora weights).
+        delta = raw_lens.compute_write_injection(target_onehot, site_id)  # [batch, d]
+
+        # Run the model with a hook that injects delta at position p-1 of block layer_idx.
+        injection_done = [False]
+
+        def _hook(module, inp, output):
+            if injection_done[0]:
+                return output
+            injection_done[0] = True
+            hidden = output[0] if isinstance(output, tuple) else output
+            # delta is [batch, d]; inject only at position p-1.
+            hidden = hidden.clone()
+            hidden[:, p - 1, :] = hidden[:, p - 1, :] + delta.to(hidden.dtype)
+            return (hidden,) + output[1:] if isinstance(output, tuple) else hidden
+
+        # Locate the transformer block — try GPT-2 style, fall back gracefully.
+        try:
+            block = self.model.transformer.h[layer_idx]
+        except (AttributeError, IndexError):
+            logger.warning(
+                "Suffix write loss: cannot locate transformer.h[%d] on this model; "
+                "skipping suffix loss for this step.", layer_idx
+            )
+            return torch.zeros((), device=self._lens_device, dtype=torch.float32)
+
+        handle = block.register_forward_hook(_hook)
+        try:
+            out = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        finally:
+            handle.remove()
+
+        # CE loss at position p-1 predicting position p.
+        logits_at_p = out.logits[:, p - 1, :]   # [batch, V]
+        loss = F.cross_entropy(logits_at_p.float(), target_tokens)
         return loss
 
     def _write_run_config_csv(self) -> None:
