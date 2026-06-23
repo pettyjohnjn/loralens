@@ -206,9 +206,6 @@ def train(args: argparse.Namespace) -> None:
         subset_kl_k=args.subset_kl_k,
         subset_kl_mode=args.subset_kl_mode,
         subset_kl_k_tail=args.subset_kl_k_tail,
-        subset_kl_tail_proposal=args.subset_kl_tail_proposal,
-        subset_kl_tail_proposal_alpha=args.subset_kl_tail_proposal_alpha,
-        subset_kl_tail_proposal_tau=args.subset_kl_tail_proposal_tau,
         token_shift=args.token_shift,
         max_seq_len=args.max_seq_len,
         per_gpu_batch_size=args.batch_size,
@@ -430,9 +427,6 @@ def train(args: argparse.Namespace) -> None:
             loss_kwargs["k"] = config.subset_kl_k
             loss_kwargs["mode"] = config.subset_kl_mode
             loss_kwargs["k_tail"] = config.subset_kl_k_tail
-            loss_kwargs["tail_proposal"] = config.subset_kl_tail_proposal
-            loss_kwargs["tail_proposal_alpha"] = config.subset_kl_tail_proposal_alpha
-            loss_kwargs["tail_proposal_tau"] = config.subset_kl_tail_proposal_tau
 
         loss_fn = create_loss(config.loss_type, **loss_kwargs)
 
@@ -735,29 +729,17 @@ def main() -> None:
                               help="Number of top-k tokens for subset KL")
     train_parser.add_argument(
         "--subset_kl_mode",
-        choices=["topk", "mc", "k2", "k3"],
+        choices=["topk", "mc"],
         default="topk",
         help=(
             "Subset KL estimator. "
             "topk: renormalize KL over top-k tokens only — fast, recommended default. "
-            "mc: exact KL on top-k head + importance-weighted MC estimate on the tail. "
-            "k2: top-k head KL + Schulman K2 squared-error tail penalty. "
-            "k3: top-k head KL + Schulman K3 tail estimator. "
-            "Use --subset_kl_k_tail > 0 to enable the tail term for mc/k2/k3."
+            "mc: exact KL on top-k head + importance-weighted teacher-tail MC estimate. "
+            "Use --subset_kl_k_tail > 0 to enable the tail term for mc."
         ),
     )
     train_parser.add_argument("--subset_kl_k_tail", type=int, default=0,
-                              help="Number of tail samples per token for mc/k2/k3 modes (0 = head only)")
-    train_parser.add_argument(
-        "--subset_kl_tail_proposal",
-        choices=["target", "teacher", "mixed", "tempered"],
-        default="target",
-        help="Proposal distribution for tail sampling in mc/k2/k3 modes. target uses the teacher distribution.",
-    )
-    train_parser.add_argument("--subset_kl_tail_proposal_alpha", type=float, default=0.8,
-                              help="Target mixture weight for mixed tail proposal")
-    train_parser.add_argument("--subset_kl_tail_proposal_tau", type=float, default=0.7,
-                              help="Tempering exponent for mixed/tempered tail proposal")
+                              help="Number of tail samples per token for mc mode (0 = head only)")
     train_parser.add_argument(
         "--token_shift",
         type=int,

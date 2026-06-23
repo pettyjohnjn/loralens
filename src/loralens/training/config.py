@@ -64,11 +64,8 @@ class TrainConfig:
     loss_type: Literal["kl", "subset_kl", "ce"] = "kl"
     kl_chunk_size: Optional[int] = 128
     subset_kl_k: int = 128  # Top-k tokens for subset KL
-    subset_kl_mode: Literal["topk", "mc", "k2", "k3"] = "topk"
-    subset_kl_k_tail: int = 0  # Tail samples for head/tail subset KL
-    subset_kl_tail_proposal: Literal["target", "teacher", "mixed", "tempered"] = "target"
-    subset_kl_tail_proposal_alpha: float = 0.8
-    subset_kl_tail_proposal_tau: float = 0.7
+    subset_kl_mode: Literal["topk", "mc"] = "topk"
+    subset_kl_k_tail: int = 0  # Tail samples for mc subset KL (0 = head only)
     token_shift: Optional[int] = None  # Auto: KL->0, CE->1
 
     # Optimization

@@ -107,22 +107,20 @@ class TestSubsetKLLoss:
         ratio = subset_loss / full_loss
         assert 0.3 < ratio < 3.0
 
-    def test_legacy_k_head_param(self):
-        """Test backward compat with k_head parameter."""
-        loss_fn = SubsetKLLoss(k_head=50)
-        assert loss_fn.k == 50
-
-    @pytest.mark.parametrize("mode", ["mc", "k2", "k3"])
-    def test_head_tail_modes_run(self, mode):
+    def test_mc_mode_runs(self):
         batch, seq, vocab = 2, 4, 100
         student = torch.randn(batch, seq, vocab)
         teacher = torch.randn(batch, seq, vocab)
         mask = torch.ones(batch, seq)
 
-        loss = SubsetKLLoss(k=16, mode=mode, k_tail=8)(student, teacher, mask)
+        loss = SubsetKLLoss(k=16, mode="mc", k_tail=8)(student, teacher, mask)
 
         assert loss.ndim == 0
         assert torch.isfinite(loss)
+
+    def test_unknown_mode_raises(self):
+        with pytest.raises(ValueError):
+            SubsetKLLoss(k=16, mode="k2")
 
 
 class TestCrossEntropyLoss:
