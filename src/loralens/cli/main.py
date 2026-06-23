@@ -199,6 +199,8 @@ def train(args: argparse.Namespace) -> None:
         lora_init_svd_metric=args.lora_init_svd_metric,
         lora_init_normalization=args.lora_init_normalization,
         activation_site_preset=args.activation_site_preset,
+        write_loss_type=args.write_loss_type,
+        write_loss_weight=args.write_loss_weight,
         loss_type=args.loss_type,
         kl_chunk_size=args.kl_chunk_size,
         subset_kl_k=args.subset_kl_k,
@@ -442,11 +444,11 @@ def train(args: argparse.Namespace) -> None:
         # Create lens
         layer_ids = activation_site_plan.site_ids
         lens_kwargs = {}
-        if config.lens_type in ("tuned", "lora"):
+        if config.lens_type in ("tuned", "lora", "bidir_lora"):
             lens_kwargs["layer_ids"] = layer_ids
             lens_kwargs["hidden_size"] = model_cfg["hidden_size"]
             lens_kwargs["unembed"] = unembed
-        if config.lens_type == "lora":
+        if config.lens_type in ("lora", "bidir_lora"):
             lens_kwargs["r"] = config.lora_rank
             lens_kwargs["alpha"] = config.lora_alpha
         if config.lens_type == "logit":
@@ -494,7 +496,7 @@ def train(args: argparse.Namespace) -> None:
         collector = ActivationCollector(model, custom_hooks=activation_site_plan.custom_hooks)
 
         if config.lora_init != "default_lora":
-            if config.lens_type != "lora" or not isinstance(lens, LoRALens):
+            if config.lens_type not in ("lora", "bidir_lora") or not isinstance(lens, LoRALens):
                 raise ValueError("--lora_init is only supported with --lens_type lora")
             if config.resume_checkpoint is not None:
                 if ddp_state.is_main:
@@ -622,13 +624,42 @@ def main() -> None:
     train_parser.add_argument("--data_source", choices=["text", "pile"], default="pile")
 
     # Lens
-    train_parser.add_argument("--lens_type", choices=["logit", "tuned", "lora"], default="lora")
+    train_parser.add_argument(
+        "--lens_type",
+        choices=["logit", "tuned", "lora", "bidir_lora"],
+        default="lora",
+        help=(
+            "lora: standard read-only LoRA lens. "
+            "bidir_lora: bidirectional LoRA lens — same architecture, adds write-direction "
+            "training via --write_loss_type."
+        ),
+    )
     train_parser.add_argument("--lora_rank", type=int, default=16)
     train_parser.add_argument(
         "--lora_alpha",
         type=float,
         default=None,
         help="LoRA alpha. Defaults to lora_rank when omitted.",
+    )
+    train_parser.add_argument(
+        "--write_loss_type",
+        choices=["none", "ortho", "suffix", "both"],
+        default="none",
+        help=(
+            "Bidirectional write loss (only active with --lens_type bidir_lora). "
+            "none: read-only training (identical to lora). "
+            "ortho: add ||h - h@M.T@M||^2 penalty to encourage M to be orthogonal "
+            "(transpose ≈ inverse, cheap). "
+            "suffix: inject write encoding at a random resid_post site and run the model "
+            "suffix to compute CE loss (directly trains write effectiveness, ~2x cost). "
+            "both: apply both ortho and suffix losses simultaneously."
+        ),
+    )
+    train_parser.add_argument(
+        "--write_loss_weight",
+        type=float,
+        default=0.1,
+        help="Weight applied to the write loss term(s) relative to the read loss.",
     )
     train_parser.add_argument(
         "--lora_init",

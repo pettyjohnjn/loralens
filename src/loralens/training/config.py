@@ -38,7 +38,7 @@ class TrainConfig:
     max_docs: Optional[int] = None
 
     # Lens
-    lens_type: Literal["logit", "tuned", "lora"] = "lora"
+    lens_type: Literal["logit", "tuned", "lora", "bidir_lora"] = "lora"
     lora_rank: int = 16
     lora_alpha: Optional[float] = None
     lora_init: Literal["default_lora", "mean_shift", "ridge_svd"] = "default_lora"
@@ -55,6 +55,10 @@ class TrainConfig:
         "gpt2_expanded",
         "gpt2_attention",
     ] = "residual"
+
+    # Write loss (bidirectional training, only active when lens_type="bidir_lora")
+    write_loss_type: Literal["none", "ortho", "suffix", "both"] = "none"
+    write_loss_weight: float = 0.1
 
     # Loss
     loss_type: Literal["kl", "subset_kl", "shared_subset_kl", "ce"] = "kl"
@@ -120,7 +124,7 @@ class TrainConfig:
 
     def __post_init__(self):
         """Validate and set defaults."""
-        if self.lens_type == "lora" and self.lora_alpha is None:
+        if self.lens_type in ("lora", "bidir_lora") and self.lora_alpha is None:
             self.lora_alpha = float(self.lora_rank)
 
         if self.token_shift is None:
@@ -155,6 +159,9 @@ class TrainConfig:
         # Lens
         if self.lens_type == "lora":
             lens_slug = f"lora-r{self.lora_rank}"
+        elif self.lens_type == "bidir_lora":
+            write_tag = f"-{self.write_loss_type}" if self.write_loss_type != "none" else ""
+            lens_slug = f"bidir-r{self.lora_rank}{write_tag}"
         else:
             lens_slug = self.lens_type  # "tuned" or "logit"
 
@@ -174,7 +181,7 @@ class TrainConfig:
         parts: list[str] = [model_slug, lens_slug, loss_slug, site_slug]
 
         # LoRA initialization strategy
-        if self.lens_type == "lora":
+        if self.lens_type in ("lora", "bidir_lora"):
             init_map = {
                 "default_lora": "init-default",
                 "mean_shift": "init-mean_shift",

@@ -26,6 +26,7 @@ from .base import BaseLens
 from .logit_lens import LogitLens
 from .tuned_lens import TunedLens
 from .lora_lens import LoRAProjection, LoRALens
+from .bidir_lora_lens import BidirLoRALens
 from .factory import create_lens, register_lens, list_lenses
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "TunedLens",
     "LoRAProjection",
     "LoRALens",
+    "BidirLoRALens",
     # Factory
     "create_lens",
     "register_lens",

@@ -21,6 +21,7 @@ echo "Nodes: $NNODES  |  GPUs/node: $NGPUS_PER_NODE  |  Master: $MASTER_ADDR:$MA
 # ── Environment preload (runs on every node via ssh) ─────────────────────────
 PRELOAD="module use /soft/modulefiles; module load conda; conda activate LoRA_Lens; "
 PRELOAD+="source ~/.hf_env; "
+PRELOAD+="export HF_HOME=/grand/SuperBERT/pettyjohnjn/cache; "
 PRELOAD+="export PYTHONPATH=$REPO/src:\$PYTHONPATH; "
 PRELOAD+="export TOKENIZERS_PARALLELISM=false; "
 PRELOAD+="export OMP_NUM_THREADS=8; "

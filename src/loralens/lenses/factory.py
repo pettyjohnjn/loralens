@@ -12,6 +12,7 @@ from .types import LayerId
 from .logit_lens import LogitLens
 from .tuned_lens import TunedLens
 from .lora_lens import LoRALens
+from .bidir_lora_lens import BidirLoRALens
 
 
 # Global registry
@@ -89,7 +90,7 @@ def create_lens(
             raise ValueError("LogitLens requires unembed")
         return cls(unembed=unembed, **kwargs)
 
-    elif name in ("tuned", "lora"):
+    elif name in ("tuned", "lora", "bidir_lora"):
         if layer_ids is None:
             raise ValueError(f"{name} lens requires layer_ids")
         if hidden_size is None:
@@ -124,3 +125,4 @@ def get_lens_class(name: str) -> Type[BaseLens]:
 register_lens("logit")(LogitLens)
 register_lens("tuned")(TunedLens)
 register_lens("lora")(LoRALens)
+register_lens("bidir_lora")(BidirLoRALens)

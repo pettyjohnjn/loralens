@@ -1,14 +1,15 @@
 #!/bin/bash
-#PBS -N loralens_llama3_8b_fsdp_2node
-#PBS -l select=2:ncpus=32:ngpus=4
-#PBS -l walltime=01:00:00
-#PBS -q debug
+#PBS -N loralens_llama3_8b_lora_r256_mc_resume
+#PBS -l select=20:ncpus=32:ngpus=4
+#PBS -l walltime=03:00:00
+#PBS -q prod
 #PBS -l filesystems=home:grand:eagle
 #PBS -A ModCon
 
 REPO=/lus/eagle/projects/ModCon/jpettyjohn/loralens-refactored
 MODEL=/grand/SuperBERT/aswathy/models/models--meta-llama--Meta-Llama-3-8B-Instruct
 CKPT_BASE=$REPO/src/checkpoints
+CKPT_DIR=$CKPT_BASE/models-meta-llama-meta-llama-3-8b-instruct/lora-r256/subset_kl-mc-k512-tail1024/llama_expanded/init-default/seed0
 
 # ── Node topology ─────────────────────────────────────────────────────────────
 MASTER_ADDR=$(head -1 $PBS_NODEFILE)
@@ -17,6 +18,7 @@ NGPUS_PER_NODE=4
 MASTER_PORT=29500
 
 echo "Nodes: $NNODES  |  GPUs/node: $NGPUS_PER_NODE  |  Master: $MASTER_ADDR:$MASTER_PORT"
+echo "Resuming from latest checkpoint in: $CKPT_DIR"
 
 # ── Environment preload (runs on every node via ssh) ─────────────────────────
 PRELOAD="module use /soft/modulefiles; module load conda; conda activate LoRA_Lens; "
@@ -31,13 +33,13 @@ LAUNCHER="python -m torch.distributed.run "
 LAUNCHER+="--nnodes=$NNODES --nproc_per_node=$NGPUS_PER_NODE --max_restarts 0 "
 LAUNCHER+="--rdzv_backend=c10d --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} "
 
-# ── Training command ──────────────────────────────────────────────────────────
+# ── Training command (resume from latest checkpoint in CKPT_DIR) ──────────────
 CMD="-m loralens.cli.main train "
 CMD+="--model_name $MODEL "
 CMD+="--multinode_model_parallel "
 CMD+="--model_dtype bf16 "
 CMD+="--lens_type lora "
-CMD+="--lora_rank 64 "
+CMD+="--lora_rank 256 "
 CMD+="--lora_init default_lora "
 CMD+="--loss_type subset_kl "
 CMD+="--subset_kl_mode mc "
@@ -47,16 +49,17 @@ CMD+="--activation_site_preset llama_expanded "
 CMD+="--data_source pile "
 CMD+="--max_seq_len 1024 "
 CMD+="--batch_size 2 "
-CMD+="--tokens_per_step 65536 "
-CMD+="--num_steps 20 "
+CMD+="--tokens_per_step 262144 "
+CMD+="--num_steps 1000 "
 CMD+="--lr 1e-3 "
-CMD+="--warmup_steps 5 "
+CMD+="--warmup_steps 25 "
 CMD+="--lr_schedule cosine "
 CMD+="--amp "
 CMD+="--amp_dtype bf16 "
-CMD+="--save_every 20 "
-CMD+="--log_every 5 "
+CMD+="--save_every 100 "
+CMD+="--log_every 10 "
 CMD+="--base_output_dir $CKPT_BASE "
+CMD+="--resume_checkpoint $CKPT_DIR "
 
 # ── Launch on every node ──────────────────────────────────────────────────────
 RANK=0

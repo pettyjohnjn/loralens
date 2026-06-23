@@ -1,0 +1,58 @@
+#!/bin/bash
+#PBS -N loralens_gpt2_bidir_ortho
+#PBS -l select=1:ncpus=32:ngpus=4
+#PBS -l walltime=01:00:00
+#PBS -q debug
+#PBS -l filesystems=home:grand:eagle
+#PBS -A ModCon
+
+REPO=/lus/eagle/projects/ModCon/jpettyjohn/loralens-refactored
+CKPT_BASE=$REPO/src/checkpoints
+
+# ── Node topology ─────────────────────────────────────────────────────────────
+MASTER_ADDR=$(head -1 $PBS_NODEFILE)
+NNODES=$(sort -u $PBS_NODEFILE | wc -l)
+NGPUS_PER_NODE=4
+MASTER_PORT=29500
+
+echo "Nodes: $NNODES  |  GPUs/node: $NGPUS_PER_NODE  |  Master: $MASTER_ADDR:$MASTER_PORT"
+
+# ── Environment ───────────────────────────────────────────────────────────────
+module use /soft/modulefiles
+module load conda
+conda activate LoRA_Lens
+source ~/.hf_env
+export PYTHONPATH=$REPO/src:$PYTHONPATH
+export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS=8
+
+# ── Launch ────────────────────────────────────────────────────────────────────
+python -m torch.distributed.run \
+    --nnodes=1 --nproc_per_node=$NGPUS_PER_NODE --standalone \
+    -m loralens.cli.main train \
+    --model_name gpt2 \
+    --lens_type bidir_lora \
+    --lora_rank 64 \
+    --lora_init default_lora \
+    --write_loss_type ortho \
+    --write_loss_weight 0.1 \
+    --loss_type subset_kl \
+    --subset_kl_mode mc \
+    --subset_kl_k 512 \
+    --subset_kl_k_tail 1024 \
+    --activation_site_preset gpt2_expanded \
+    --data_source pile \
+    --max_seq_len 1024 \
+    --batch_size 16 \
+    --tokens_per_step 262144 \
+    --num_steps 500 \
+    --warmup_steps 0 \
+    --lr 1e-3 \
+    --amp \
+    --amp_dtype bf16 \
+    --save_every 25 \
+    --log_every 5 \
+    --base_output_dir $CKPT_BASE \
+    $(ls -t $CKPT_BASE/gpt2/bidir-r64-ortho/subset_kl-mc-k512-tail1024/gpt2_expanded/init-default/seed0/lens_step_*.pt 2>/dev/null | head -1 | xargs -I{} echo --resume_checkpoint {})
+
+echo "Done."
