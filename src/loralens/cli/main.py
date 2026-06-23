@@ -181,6 +181,125 @@ def build_dataloader_factory(config: TrainConfig, tokenizer, ddp_state: DDPState
     return factory
 
 
+def _load_teacher_model(config: TrainConfig, ddp_state: DDPState):
+    """Load the frozen teacher model and build the lens-side unembed + site plan.
+
+    Returns ``(model, unembed, model_cfg, activation_site_plan, shard_state,
+    lens_device)``. Three loading paths are supported:
+
+    1. Multi-node FSDP (``multinode_model_parallel``): load to CPU, build the
+       unembed *before* FSDP wrapping (which shards parameters), then wrap.
+    2. Single-node device_map (``model_parallel``): HuggingFace shards the
+       teacher across GPUs; the unembed is cloned to a separate lens device.
+    3. Standard single-GPU (optionally DDP-replicated via torchrun).
+    """
+    dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+    model_dtype = dtype_map.get(config.model_dtype, torch.bfloat16)
+
+    if config.multinode_model_parallel:
+        # Load to CPU and create the unembed before FSDP wrapping shards params.
+        cpu_model_kwargs = {
+            "torch_dtype": model_dtype,
+            "device_map": "cpu",
+            "low_cpu_mem_usage": True,
+        }
+        if config.model_revision is not None:
+            cpu_model_kwargs["revision"] = config.model_revision
+        if config.attn_implementation is not None:
+            cpu_model_kwargs["attn_implementation"] = config.attn_implementation
+
+        cpu_model = AutoModelForCausalLM.from_pretrained(config.model_name, **cpu_model_kwargs)
+        for p in cpu_model.parameters():
+            p.requires_grad = False
+        cpu_model.eval()
+
+        model_cfg = get_model_config(cpu_model)
+        activation_site_plan = build_activation_site_plan(
+            cpu_model,
+            num_layers=model_cfg["num_layers"],
+            preset=config.activation_site_preset,
+        )
+        unembed = HFUnembed(cpu_model).clone_to_device(ddp_state.device)
+        logger.info(f"Cloned unembed to {ddp_state.device} (pre-FSDP)")
+
+        model, mn_shard = load_sharded_model_multinode(
+            config.model_name,
+            local_rank=ddp_state.local_rank,
+            model_revision=config.model_revision,
+            dtype=model_dtype,
+            cpu_offload=config.fsdp_offload_to_cpu,
+            attn_implementation=config.attn_implementation,
+            _preloaded_model=cpu_model,
+        )
+        del cpu_model
+        activation_site_plan = adapt_activation_site_plan_for_model(model, activation_site_plan)
+
+        # FSDP handles sharding transparently; the trainer uses the standard DDP path.
+        shard_state = disabled_shard_state(ddp_state.device)
+        lens_device = ddp_state.device
+        if ddp_state.is_main:
+            logger.info(f"FSDP sharding: {mn_shard}")
+
+    elif config.model_parallel:
+        model, shard_state = load_sharded_model(
+            config.model_name,
+            model_revision=config.model_revision,
+            dtype=model_dtype,
+            per_gpu_max_memory=config.per_gpu_max_memory,
+            cpu_offload_gb=config.cpu_offload_gb,
+            attn_implementation=config.attn_implementation,
+        )
+        logger.info(f"Model sharding: {shard_state}")
+        lens_device = shard_state.lens_device
+        model_cfg = get_model_config(model)
+        activation_site_plan = build_activation_site_plan(
+            model,
+            num_layers=model_cfg["num_layers"],
+            preset=config.activation_site_preset,
+        )
+        unembed = HFUnembed(model).clone_to_device(lens_device)
+        logger.info(f"Cloned unembed to {lens_device}")
+
+    else:
+        model_kwargs = {
+            "torch_dtype": model_dtype,
+            "low_cpu_mem_usage": True,
+        }
+        if config.model_revision is not None:
+            model_kwargs["revision"] = config.model_revision
+        if config.attn_implementation is not None:
+            model_kwargs["attn_implementation"] = config.attn_implementation
+
+        model = AutoModelForCausalLM.from_pretrained(config.model_name, **model_kwargs)
+        for p in model.parameters():
+            p.requires_grad = False
+        model.to(ddp_state.device)
+        model.eval()
+        shard_state = disabled_shard_state(ddp_state.device)
+        lens_device = ddp_state.device
+        model_cfg = get_model_config(model)
+        activation_site_plan = build_activation_site_plan(
+            model,
+            num_layers=model_cfg["num_layers"],
+            preset=config.activation_site_preset,
+        )
+        unembed = HFUnembed(model)
+
+    return model, unembed, model_cfg, activation_site_plan, shard_state, lens_device
+
+
+def _build_loss(config: TrainConfig):
+    """Construct the loss function from the loss-related config fields."""
+    loss_kwargs = {"reduction": "mean"}
+    if config.loss_type == "kl":
+        loss_kwargs["chunk_size"] = config.kl_chunk_size if config.kl_chunk_size > 0 else None
+    elif config.loss_type == "subset_kl":
+        loss_kwargs["k"] = config.subset_kl_k
+        loss_kwargs["mode"] = config.subset_kl_mode
+        loss_kwargs["k_tail"] = config.subset_kl_k_tail
+    return create_loss(config.loss_type, **loss_kwargs)
+
+
 def train(args: argparse.Namespace) -> None:
     """Run training."""
     # Build config from args
@@ -295,114 +414,14 @@ def train(args: argparse.Namespace) -> None:
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
-        model_dtype = dtype_map.get(config.model_dtype, torch.bfloat16)
-
-        # --- Model loading: three paths ---
-        if config.multinode_model_parallel:
-            # Path 1: Multi-node FSDP sharding
-            # load_sharded_model_multinode loads to CPU first, then wraps
-            # with FSDP. We must create unembed BEFORE FSDP wrapping
-            # since FSDP shards the parameters.
-            #
-            # Load to CPU, create unembed before FSDP wrapping shards params
-
-            from transformers import AutoModelForCausalLM as _AutoModel
-            _cpu_model_kwargs = {
-                "torch_dtype": model_dtype,
-                "device_map": "cpu",
-                "low_cpu_mem_usage": True,
-            }
-            if config.model_revision is not None:
-                _cpu_model_kwargs["revision"] = config.model_revision
-            if config.attn_implementation is not None:
-                _cpu_model_kwargs["attn_implementation"] = config.attn_implementation
-
-            _cpu_model = _AutoModel.from_pretrained(config.model_name, **_cpu_model_kwargs)
-            for p in _cpu_model.parameters():
-                p.requires_grad = False
-            _cpu_model.eval()
-
-            # Get config and create unembed BEFORE FSDP wrapping
-            model_cfg = get_model_config(_cpu_model)
-            activation_site_plan = build_activation_site_plan(
-                _cpu_model,
-                num_layers=model_cfg["num_layers"],
-                preset=config.activation_site_preset,
-            )
-            unembed = HFUnembed(_cpu_model)
-            unembed = unembed.clone_to_device(ddp_state.device)
-            logger.info(f"Cloned unembed to {ddp_state.device} (pre-FSDP)")
-
-            # Now wrap with FSDP
-            model, _mn_shard = load_sharded_model_multinode(
-                config.model_name,
-                local_rank=ddp_state.local_rank,
-                model_revision=config.model_revision,
-                dtype=model_dtype,
-                cpu_offload=config.fsdp_offload_to_cpu,
-                attn_implementation=config.attn_implementation,
-                _preloaded_model=_cpu_model,  # Pass already-loaded model
-            )
-            del _cpu_model
-            activation_site_plan = adapt_activation_site_plan_for_model(
-                model,
-                activation_site_plan,
-            )
-
-            # Trainer uses standard DDP path (FSDP handles sharding transparently)
-            shard_state = disabled_shard_state(ddp_state.device)
-            lens_device = ddp_state.device
-            if ddp_state.is_main:
-                logger.info(f"FSDP sharding: {_mn_shard}")
-
-        elif config.model_parallel:
-            # Path 2: Single-node device_map sharding
-            model, shard_state = load_sharded_model(
-                config.model_name,
-                model_revision=config.model_revision,
-                dtype=model_dtype,
-                per_gpu_max_memory=config.per_gpu_max_memory,
-                cpu_offload_gb=config.cpu_offload_gb,
-                attn_implementation=config.attn_implementation,
-            )
-            logger.info(f"Model sharding: {shard_state}")
-            lens_device = shard_state.lens_device
-
-        else:
-            # Path 3: Standard single-GPU (with optional DDP replication)
-            model_kwargs = {
-                "torch_dtype": model_dtype,
-                "low_cpu_mem_usage": True,
-            }
-            if config.model_revision is not None:
-                model_kwargs["revision"] = config.model_revision
-            if config.attn_implementation is not None:
-                model_kwargs["attn_implementation"] = config.attn_implementation
-
-            model = AutoModelForCausalLM.from_pretrained(config.model_name, **model_kwargs)
-            for p in model.parameters():
-                p.requires_grad = False
-            model.to(ddp_state.device)
-            model.eval()
-            shard_state = disabled_shard_state(ddp_state.device)
-            lens_device = ddp_state.device
-
-        # Get model config (skip for multinode, already done above)
-        if not config.multinode_model_parallel:
-            model_cfg = get_model_config(model)
-            activation_site_plan = build_activation_site_plan(
-                model,
-                num_layers=model_cfg["num_layers"],
-                preset=config.activation_site_preset,
-            )
-
-        # Create unembed (skip for multinode, already done above)
-        if not config.multinode_model_parallel:
-            unembed = HFUnembed(model)
-            if config.model_parallel:
-                unembed = unembed.clone_to_device(lens_device)
-                logger.info(f"Cloned unembed to {lens_device}")
+        (
+            model,
+            unembed,
+            model_cfg,
+            activation_site_plan,
+            shard_state,
+            lens_device,
+        ) = _load_teacher_model(config, ddp_state)
 
         if (
             ddp_state.is_main
@@ -418,17 +437,7 @@ def train(args: argparse.Namespace) -> None:
             )
 
         # Create loss function
-        loss_kwargs = {"reduction": "mean"}
-        if config.loss_type == "kl":
-            loss_kwargs["chunk_size"] = (
-                config.kl_chunk_size if config.kl_chunk_size > 0 else None
-            )
-        elif config.loss_type == "subset_kl":
-            loss_kwargs["k"] = config.subset_kl_k
-            loss_kwargs["mode"] = config.subset_kl_mode
-            loss_kwargs["k_tail"] = config.subset_kl_k_tail
-
-        loss_fn = create_loss(config.loss_type, **loss_kwargs)
+        loss_fn = _build_loss(config)
 
         # Create lens
         layer_ids = activation_site_plan.site_ids
