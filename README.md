@@ -40,9 +40,9 @@ loralens/
   dot(H[i,:], W[idx[i,j],:])` without materialising `[N, k, d]` tensors.
   `loralens.ops` wraps it with fallback support.
 
-- **loralens** itself provides: lenses (LogitLens, TunedLens, LoRALens),
-  SharedSubsetKLLoss (tightly coupled to lenses), CrossEntropyLoss,
-  training orchestration, data loading, and the CLI.
+- **loralens** itself provides: lenses (LogitLens, TunedLens, LoRALens,
+  BidirLoRALens), CrossEntropyLoss, training orchestration, data loading,
+  and the CLI.
 
 ## Quick Start
 
@@ -81,6 +81,5 @@ loralens train --model_name gpt2 --lens_type lora --loss_type subset_kl
 | Loss | Memory | Use Case |
 |------|--------|----------|
 | `kl` | O(B·T·V) | Baseline, small models |
-| `subset_kl` | O(B·T·k) | Recommended default |
-| `shared_subset_kl` | O(B·chunk·K) | Largest models |
+| `subset_kl` | O(B·T·k) | Recommended default (`topk` or `mc`) |
 | `ce` | O(B·T·V) | Label-based training |

@@ -1,7 +1,7 @@
 # src/loralens/__init__.py
 """LoRA Lens - Scalable lens-based interpretability for large language models."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from loralens.hooks import ActivationCollector
 from loralens.losses import create_loss, BaseLoss
