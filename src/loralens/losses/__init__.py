@@ -5,17 +5,13 @@ Losses module - Pluggable loss functions for lens training.
 Loss Types
 ----------
 - KLDivergenceLoss: Full-vocabulary KL divergence (via subset-kl)
-- SubsetKLLoss: Memory-efficient top-k subset KL (via subset-kl)
-- SharedSubsetKLLoss: Memory-efficient shared candidate set KL
+- SubsetKLLoss: Memory-efficient top-k / MC subset KL (via subset-kl)
 - CrossEntropyLoss: Next-token prediction CE loss
 
 Example usage::
 
     # Simple top-k (recommended)
     loss_fn = SubsetKLLoss(k=256)
-
-    # Shared subset (most memory efficient)
-    loss_fn = SharedSubsetKLLoss(top_m=16, max_K=512)
 
     # Compute loss
     loss = loss_fn(
@@ -28,7 +24,6 @@ Example usage::
 from .base import BaseLoss
 from .kl import KLDivergenceLoss
 from .subset_kl import SubsetKLLoss
-from .shared_subset_kl import SharedSubsetKLLoss
 from .cross_entropy import CrossEntropyLoss
 from .factory import create_loss, register_loss, list_losses
 
@@ -37,7 +32,6 @@ __all__ = [
     "BaseLoss",
     "KLDivergenceLoss",
     "SubsetKLLoss",
-    "SharedSubsetKLLoss",
     "CrossEntropyLoss",
     # Factory functions
     "create_loss",

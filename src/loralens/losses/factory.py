@@ -8,7 +8,6 @@ from typing import Any, Callable, Dict, List, Type
 from .base import BaseLoss
 from .kl import KLDivergenceLoss
 from .subset_kl import SubsetKLLoss
-from .shared_subset_kl import SharedSubsetKLLoss
 from .cross_entropy import CrossEntropyLoss
 
 
@@ -42,7 +41,6 @@ def create_loss(name: str, **kwargs: Any) -> BaseLoss:
         Name of the loss function. One of:
         - "kl": Full KL divergence
         - "subset_kl": Per-position top-k subset KL
-        - "shared_subset_kl": Shared candidate set KL (most memory efficient)
         - "ce" or "cross_entropy": Cross-entropy loss
     **kwargs
         Arguments passed to the loss constructor.
@@ -56,7 +54,6 @@ def create_loss(name: str, **kwargs: Any) -> BaseLoss:
     --------
     >>> loss_fn = create_loss("kl", chunk_size=128)
     >>> loss_fn = create_loss("subset_kl", k=256)
-    >>> loss_fn = create_loss("shared_subset_kl", top_m=16, max_K=512)
     >>> loss_fn = create_loss("ce", label_smoothing=0.1)
     """
     if name not in _LOSS_REGISTRY:
@@ -83,6 +80,5 @@ def get_loss_class(name: str) -> Type[BaseLoss]:
 register_loss("kl")(KLDivergenceLoss)
 register_loss("kl_divergence")(KLDivergenceLoss)
 register_loss("subset_kl")(SubsetKLLoss)
-register_loss("shared_subset_kl")(SharedSubsetKLLoss)
 register_loss("ce")(CrossEntropyLoss)
 register_loss("cross_entropy")(CrossEntropyLoss)

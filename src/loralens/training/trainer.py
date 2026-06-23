@@ -24,7 +24,6 @@ from torch.utils.data import DataLoader
 
 from loralens.hooks import ActivationCollector
 from loralens.losses import BaseLoss, SubsetKLLoss
-from loralens.losses.shared_subset_kl import SharedSubsetKLLoss
 from loralens.lenses import BaseLens
 from loralens.lenses.bidir_lora_lens import BidirLoRALens
 
@@ -135,13 +134,11 @@ class LensTrainer:
 
         # Determine if we use chunked KL (full vocab) vs subset KL
         self._use_subset_kl = isinstance(loss_fn, SubsetKLLoss)
-        self._use_shared_subset_kl = isinstance(loss_fn, SharedSubsetKLLoss)
         self._use_chunked_kl = (
             config.loss_type == "kl"
             and config.kl_chunk_size is not None
             and config.kl_chunk_size > 0
             and not self._use_subset_kl
-            and not self._use_shared_subset_kl
         )
 
     @staticmethod
@@ -454,16 +451,6 @@ class LensTrainer:
                                 shift=shift,
                                 t_slices=t_slices,
                             )
-                        elif self._use_shared_subset_kl:
-                            # Shared subset KL - most memory efficient
-                            layer_loss = self._compute_shared_subset_kl_loss(
-                                lens=lens,
-                                h_full_raw=h_full_raw,
-                                teacher_logits_full=teacher_logits_full,
-                                attn_full=attn_full,
-                                layer_id=layer_id,
-                                shift=shift,
-                            )
                         elif self._use_subset_kl:
                             # Per-position subset KL path
                             layer_loss = self._compute_subset_kl_loss(
@@ -641,70 +628,6 @@ class LensTrainer:
             )
 
             # Accumulate (loss_fn returns mean, we want sum for proper averaging)
-            chunk_count = attn.sum(dtype=torch.float32)
-            loss_sum = loss_sum + chunk_loss * chunk_count
-            denom = denom + chunk_count
-
-            del h, teacher_chunk, attn, chunk_loss
-
-        del h_full
-        return loss_sum / denom.clamp_min(1.0)
-
-    def _compute_shared_subset_kl_loss(
-        self,
-        lens: nn.Module,
-        h_full_raw: torch.Tensor,
-        teacher_logits_full: torch.Tensor,
-        attn_full: torch.Tensor,
-        layer_id,
-        shift: int,
-    ) -> torch.Tensor:
-        """
-        Compute shared subset KL loss with T-chunking.
-
-        Uses SharedSubsetKLLoss which builds a shared candidate vocabulary
-        per chunk, then computes student logits ONLY for those candidates.
-
-        Memory: O(B * chunk_T * K) where K << V.
-        """
-        device = h_full_raw.device
-        loss_sum = torch.zeros((), device=device, dtype=torch.float32)
-        denom = torch.zeros((), device=device, dtype=torch.float32)
-
-        # Lazy slicing - view, not copy
-        if shift > 0:
-            h_full = h_full_raw[:, :-shift, :]
-        else:
-            h_full = h_full_raw
-
-        # Get T-dimension slices
-        T_eff = attn_full.size(1)
-        chunk_size = self.config.kl_chunk_size or 128
-        t_slices = [(t0, min(t0 + chunk_size, T_eff)) for t0 in range(0, T_eff, chunk_size)]
-
-        # Get raw lens for forward_with_lens
-        raw_lens = lens.module if isinstance(lens, DDP) else lens
-
-        for t0, t1 in t_slices:
-            attn = attn_full[:, t0:t1].contiguous()
-            if attn.sum().item() == 0:
-                continue
-
-            # Only copy the chunk
-            h = h_full[:, t0:t1, :].contiguous()
-            teacher_chunk = teacher_logits_full[:, t0:t1, :].contiguous()
-
-            # Forward through SharedSubsetKLLoss
-            # This never materializes [B, chunk_T, V] student logits!
-            chunk_loss = self.loss_fn.forward_with_lens(
-                hidden_states=h,
-                teacher_logits=teacher_chunk,
-                lens=raw_lens,
-                layer=layer_id,
-                attention_mask=attn,
-            )
-
-            # Accumulate
             chunk_count = attn.sum(dtype=torch.float32)
             loss_sum = loss_sum + chunk_loss * chunk_count
             denom = denom + chunk_count

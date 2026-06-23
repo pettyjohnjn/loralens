@@ -209,8 +209,6 @@ def train(args: argparse.Namespace) -> None:
         subset_kl_tail_proposal=args.subset_kl_tail_proposal,
         subset_kl_tail_proposal_alpha=args.subset_kl_tail_proposal_alpha,
         subset_kl_tail_proposal_tau=args.subset_kl_tail_proposal_tau,
-        shared_subset_top_m=args.shared_subset_top_m,
-        shared_subset_max_K=args.shared_subset_max_K,
         token_shift=args.token_shift,
         max_seq_len=args.max_seq_len,
         per_gpu_batch_size=args.batch_size,
@@ -435,9 +433,6 @@ def train(args: argparse.Namespace) -> None:
             loss_kwargs["tail_proposal"] = config.subset_kl_tail_proposal
             loss_kwargs["tail_proposal_alpha"] = config.subset_kl_tail_proposal_alpha
             loss_kwargs["tail_proposal_tau"] = config.subset_kl_tail_proposal_tau
-        elif config.loss_type == "shared_subset_kl":
-            loss_kwargs["top_m"] = config.shared_subset_top_m
-            loss_kwargs["max_K"] = config.shared_subset_max_K
 
         loss_fn = create_loss(config.loss_type, **loss_kwargs)
 
@@ -734,7 +729,7 @@ def main() -> None:
     )
 
     # Loss
-    train_parser.add_argument("--loss_type", choices=["kl", "subset_kl", "shared_subset_kl", "ce"], default="kl")
+    train_parser.add_argument("--loss_type", choices=["kl", "subset_kl", "ce"], default="kl")
     train_parser.add_argument("--kl_chunk_size", type=int, default=128)
     train_parser.add_argument("--subset_kl_k", type=int, default=128,
                               help="Number of top-k tokens for subset KL")
@@ -763,10 +758,6 @@ def main() -> None:
                               help="Target mixture weight for mixed tail proposal")
     train_parser.add_argument("--subset_kl_tail_proposal_tau", type=float, default=0.7,
                               help="Tempering exponent for mixed/tempered tail proposal")
-    train_parser.add_argument("--shared_subset_top_m", type=int, default=16,
-                              help="Per-position candidates for shared subset KL")
-    train_parser.add_argument("--shared_subset_max_K", type=int, default=512,
-                              help="Max shared candidate set size")
     train_parser.add_argument(
         "--token_shift",
         type=int,
@@ -775,7 +766,7 @@ def main() -> None:
             "Token offset between teacher logits and target labels. "
             "0: teacher and student see the same position (KL distillation). "
             "1: predict position i+1's token from position i's hidden state (CE). "
-            "Defaults to 0 for kl/subset_kl/shared_subset_kl and 1 for ce."
+            "Defaults to 0 for kl/subset_kl and 1 for ce."
         ),
     )
 

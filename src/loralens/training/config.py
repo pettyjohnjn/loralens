@@ -61,7 +61,7 @@ class TrainConfig:
     write_loss_weight: float = 0.1
 
     # Loss
-    loss_type: Literal["kl", "subset_kl", "shared_subset_kl", "ce"] = "kl"
+    loss_type: Literal["kl", "subset_kl", "ce"] = "kl"
     kl_chunk_size: Optional[int] = 128
     subset_kl_k: int = 128  # Top-k tokens for subset KL
     subset_kl_mode: Literal["topk", "mc", "k2", "k3"] = "topk"
@@ -69,9 +69,6 @@ class TrainConfig:
     subset_kl_tail_proposal: Literal["target", "teacher", "mixed", "tempered"] = "target"
     subset_kl_tail_proposal_alpha: float = 0.8
     subset_kl_tail_proposal_tau: float = 0.7
-    # Shared subset KL params
-    shared_subset_top_m: int = 16  # Per-position candidates
-    shared_subset_max_K: int = 512  # Max shared set size
     token_shift: Optional[int] = None  # Auto: KL->0, CE->1
 
     # Optimization
@@ -128,7 +125,7 @@ class TrainConfig:
             self.lora_alpha = float(self.lora_rank)
 
         if self.token_shift is None:
-            self.token_shift = 0 if self.loss_type in ("kl", "subset_kl", "shared_subset_kl") else 1
+            self.token_shift = 0 if self.loss_type in ("kl", "subset_kl") else 1
 
         if self.stride is None:
             self.stride = self.max_seq_len
@@ -170,8 +167,6 @@ class TrainConfig:
             loss_slug = f"subset_kl-{self.subset_kl_mode}-k{self.subset_kl_k}"
             if self.subset_kl_k_tail > 0:
                 loss_slug += f"-tail{self.subset_kl_k_tail}"
-        elif self.loss_type == "shared_subset_kl":
-            loss_slug = f"shared_kl-m{self.shared_subset_top_m}-K{self.shared_subset_max_K}"
         else:
             loss_slug = self.loss_type  # "kl" or "ce"
 
