@@ -47,6 +47,19 @@ class BaseLens(nn.Module, ABC):
         """
         return []
 
+    def _resolve_module_key(self, layer: Optional[LayerId]) -> str:
+        """Resolve a layer id to its ``ModuleDict`` key, raising on unknown layers.
+
+        Used by per-layer lenses that populate ``self._module_keys``; the returned
+        key indexes the lens's per-layer module dict (translators/projections).
+        """
+        if layer is None:
+            raise ValueError(f"{type(self).__name__} requires a layer argument.")
+        module_key = self._module_keys.get(canonical_layer_id(layer))
+        if module_key is None:
+            raise KeyError(f"Layer {layer!r} not found. Available: {self.layer_ids}")
+        return module_key
+
     @abstractmethod
     def compute_logits(
         self,

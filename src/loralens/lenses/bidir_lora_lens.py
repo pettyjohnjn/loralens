@@ -29,8 +29,9 @@ from typing import Iterable, Optional
 
 import torch
 
+from ._unembed import unembed_weight_bias
 from .lora_lens import LoRALens, LoRAProjection
-from .types import LayerId, canonical_layer_id
+from .types import LayerId
 
 
 class BidirLoRALens(LoRALens):
@@ -59,14 +60,13 @@ class BidirLoRALens(LoRALens):
 
     def _get_W_U(self) -> torch.Tensor:
         """Return lm_head weight [V, d] from the frozen unembed module."""
-        if hasattr(self.unembed, "lm_head"):
-            return self.unembed.lm_head.weight
-        if hasattr(self.unembed, "weight"):
-            return self.unembed.weight
-        raise AttributeError(
-            "Cannot locate lm_head weight in unembed module. "
-            "Expected self.unembed.lm_head.weight or self.unembed.weight."
-        )
+        wb = unembed_weight_bias(self.unembed)
+        if wb is None:
+            raise AttributeError(
+                "Cannot locate lm_head weight in unembed module. "
+                "Expected self.unembed.lm_head.weight or self.unembed.weight."
+            )
+        return wb[0]
 
     def _woodbury_inverse_row(
         self,
@@ -149,14 +149,7 @@ class BidirLoRALens(LoRALens):
         Returns:
             [batch, d]  injection vector, in the same dtype as lm_head.weight.
         """
-        lid = canonical_layer_id(layer)
-        module_key = self._module_keys.get(lid)
-        if module_key is None or module_key not in self.projections:
-            raise KeyError(
-                f"Layer {layer!r} not found. Available: {self.layer_ids}"
-            )
-
-        proj = self.projections[module_key]
+        proj = self.projections[self._resolve_module_key(layer)]
         W_U  = self._get_W_U()    # [V, d], frozen
 
         if vocab_logits.dim() == 1:
@@ -199,12 +192,7 @@ class BidirLoRALens(LoRALens):
         Returns:
             Scalar penalty (mean over all tokens).
         """
-        lid = canonical_layer_id(layer)
-        module_key = self._module_keys.get(lid)
-        if module_key is None or module_key not in self.projections:
-            raise KeyError(f"Layer {layer!r} not found.")
-
-        proj = self.projections[module_key]
+        proj = self.projections[self._resolve_module_key(layer)]
         A_w  = proj.lora_A.weight   # [r, d]
         B_w  = proj.lora_B.weight   # [d, r]
         s    = proj.scaling
