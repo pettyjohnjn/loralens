@@ -92,6 +92,15 @@ def _masked_kl_logtarget(
         raise ValueError(f"Unknown reduction: {reduction}")
 
 
+def _shift_view(h: torch.Tensor, shift: int) -> torch.Tensor:
+    """Drop the last ``shift`` positions along the sequence dim (a view, no copy).
+
+    Aligns hidden states with the shifted teacher logits / labels; ``shift == 0``
+    returns the tensor unchanged.
+    """
+    return h[:, :-shift, :] if shift > 0 else h
+
+
 class LensTrainer:
     """Orchestrates lens training with memory-optimized layer-wise backward."""
 
@@ -477,12 +486,8 @@ class LensTrainer:
 
                         # Approach A: orthogonality penalty (free alongside read loss)
                         if write_type in ("ortho", "both"):
-                            if shift > 0:
-                                h_for_ortho = h_full_raw[:, :-shift, :]
-                            else:
-                                h_for_ortho = h_full_raw
                             ortho_pen = raw_lens.compute_orthogonality_penalty(
-                                h_for_ortho, layer_id
+                                _shift_view(h_full_raw, shift), layer_id
                             )
                             layer_loss = layer_loss + write_weight * ortho_pen
 
@@ -536,11 +541,7 @@ class LensTrainer:
         loss_sum = torch.zeros((), device=device, dtype=torch.float32)
         denom = torch.zeros((), device=device, dtype=torch.float32)
 
-        # View, not copy
-        if shift > 0:
-            h_full = h_full_raw[:, :-shift, :]  # View!
-        else:
-            h_full = h_full_raw  # Reference!
+        h_full = _shift_view(h_full_raw, shift)
 
         for t0, t1 in t_slices:
             attn = attn_full[:, t0:t1].contiguous()
@@ -597,11 +598,7 @@ class LensTrainer:
         loss_sum = torch.zeros((), device=device, dtype=torch.float32)
         denom = torch.zeros((), device=device, dtype=torch.float32)
 
-        # Lazy slicing - view, not copy
-        if shift > 0:
-            h_full = h_full_raw[:, :-shift, :]
-        else:
-            h_full = h_full_raw
+        h_full = _shift_view(h_full_raw, shift)
 
         for chunk_idx, (t0, t1) in enumerate(t_slices):
             attn = attn_full[:, t0:t1].contiguous()
@@ -648,10 +645,7 @@ class LensTrainer:
         shift: int,
     ) -> torch.Tensor:
         """Compute standard loss (CE or non-chunked KL)."""
-        if shift > 0:
-            h = h_full_raw[:, :-shift, :].contiguous()
-        else:
-            h = h_full_raw.contiguous()
+        h = _shift_view(h_full_raw, shift).contiguous()
 
         lens_out = lens(h, layer=layer_id)
 

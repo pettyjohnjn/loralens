@@ -228,14 +228,6 @@ class LoRALens(BaseLens):
             self.unembed, flat, vocab_indices, batch, seq
         )
 
-    def trainable_parameters(self) -> int:
-        """Count trainable parameters."""
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-    def total_parameters(self) -> int:
-        """Count total parameters (including frozen unembed)."""
-        return sum(p.numel() for p in self.parameters())
-
     def parameter_savings_ratio(self) -> float:
         """Ratio of full-rank to LoRA parameters."""
         full_rank = self.hidden_size ** 2 * len(self._layer_ids)
@@ -243,10 +235,8 @@ class LoRALens(BaseLens):
         return full_rank / max(lora_params, 1)
 
     def __repr__(self) -> str:
-        trainable = self.trainable_parameters()
-        total = self.total_parameters()
         return (
             f"LoRALens(vocab_size={self.vocab_size}, r={self.r}, "
             f"layers={len(self._layer_ids)}, "
-            f"params={trainable:,}/{total:,})"
+            f"params={self.num_trainable_parameters():,}/{self.num_parameters():,})"
         )
