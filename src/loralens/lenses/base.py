@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn

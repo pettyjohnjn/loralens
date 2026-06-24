@@ -7,7 +7,6 @@ from contextlib import nullcontext
 from typing import Literal, Optional
 
 import torch
-import torch.nn as nn
 
 
 class AMPContext:

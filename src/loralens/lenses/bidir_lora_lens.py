@@ -25,8 +25,6 @@ Write injection (approach B):
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
-
 import torch
 
 from ._unembed import unembed_weight_bias

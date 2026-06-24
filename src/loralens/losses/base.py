@@ -9,7 +9,7 @@ This extends the ``subset_kl.BaseLoss`` interface with an additional
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, Literal
+from typing import Optional
 
 import torch
 
