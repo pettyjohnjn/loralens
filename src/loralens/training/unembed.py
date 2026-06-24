@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 import torch
 import torch.nn as nn
@@ -60,65 +60,17 @@ class HFUnembed(nn.Module):
         for p in self.parameters():
             p.requires_grad = False
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        *,
-        idx_subset: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Apply layer norm (if present) and LM head.
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Apply the final norm (if present) and LM head.
 
-        Parameters
-        ----------
-        hidden_states : torch.Tensor
-            Shape [batch, seq, hidden].
-        idx_subset : Optional[torch.Tensor]
-            If provided, only compute logits for these vocab indices.
-            Shape [batch, seq, k] for per-position indices.
-
-        Returns
-        -------
-        torch.Tensor
-            Logits of shape [batch, seq, vocab] or [batch, seq, k] if idx_subset.
+        Returns full-vocabulary logits [batch, seq, vocab]. Subset computation
+        for memory-efficient training is handled by the lenses, which extract the
+        weight directly (see ``lenses/_unembed.py``).
         """
         h = hidden_states
-
         if self.layer_norm is not None:
             h = self.layer_norm(h)
-
-        if idx_subset is None:
-            # Full vocabulary path
-            return self.lm_head(h)
-
-        # Efficient subset path with unique index deduplication
-        # This optimization is crucial when many positions share similar top-k indices
-        B, T, k = idx_subset.shape
-        d = h.size(-1)
-
-        h_flat = h.reshape(-1, d)              # [B*T, d]
-        idx_flat = idx_subset.reshape(-1, k)   # [B*T, k]
-
-        # Deduplicate indices - key optimization!
-        # Many positions may share the same top-k indices
-        uniq_idx, inverse = torch.unique(idx_flat, return_inverse=True)
-
-        # Only gather unique rows from weight matrix
-        W_sel = self.lm_head.weight[uniq_idx]  # [num_unique, d]
-
-        # Compute logits for unique indices
-        logits_sel = h_flat @ W_sel.T          # [B*T, num_unique]
-
-        # Add bias if present
-        if self.lm_head.bias is not None:
-            logits_sel = logits_sel + self.lm_head.bias[uniq_idx]
-
-        # Map back to per-position indices via inverse
-        logits_k = torch.gather(
-            logits_sel, 1, inverse.view(-1, k)
-        ).view(B, T, k)
-
-        return logits_k
+        return self.lm_head(h)
 
     def __repr__(self) -> str:
         has_ln = self.layer_norm is not None
