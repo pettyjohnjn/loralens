@@ -13,7 +13,7 @@ from typing import Optional
 
 import torch
 
-from subset_kl import ReductionType
+from subset_kl import ReductionType, apply_reduction
 
 
 class BaseLoss(ABC):
@@ -81,24 +81,8 @@ class BaseLoss(ABC):
         loss: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Apply reduction to per-token loss."""
-        if self.reduction == "none":
-            return loss
-
-        if mask is not None:
-            loss = loss * mask.to(loss.dtype)
-
-        if self.reduction == "sum":
-            return loss.sum()
-
-        if self.reduction == "mean":
-            if mask is not None:
-                denom = mask.sum().clamp_min(1.0)
-            else:
-                denom = loss.numel()
-            return loss.sum() / denom
-
-        raise ValueError(f"Unknown reduction: {self.reduction}")
+        """Apply reduction to a per-token loss (delegates to subset_kl)."""
+        return apply_reduction(loss, mask, self.reduction)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(reduction={self.reduction!r})"

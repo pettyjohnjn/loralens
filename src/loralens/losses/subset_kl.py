@@ -2,14 +2,18 @@
 """
 Subset KL divergence loss for memory-efficient lens training.
 
-Thin adapter around ``subset_kl.SubsetKLLoss`` that conforms to the loralens
-``BaseLoss`` interface. Two estimators are supported:
+Thin adapter that delegates the KL math to the ``subset_kl`` package and adapts
+it to the loralens ``BaseLoss`` interface and the lens-aware (per-layer,
+gathered) training path. Two estimators are supported:
 
 - ``"topk"`` (default): top-k renormalized KL over the teacher's top-k tokens.
-  Fast and recommended for most runs; delegates to ``subset_kl.SubsetKLLoss``.
+  Fast and recommended for most runs.
 - ``"mc"``: exact KL on the top-k head plus an importance-weighted Monte Carlo
   estimate of the tail, sampled from the (normalized) teacher tail. Enable the
   tail term with ``k_tail > 0``.
+
+The estimator implementations live in ``subset_kl`` (single source of truth);
+this module only wires the lens's subset-logit outputs into them.
 """
 
 from __future__ import annotations
@@ -17,10 +21,16 @@ from __future__ import annotations
 from typing import Any, Literal, Optional, TYPE_CHECKING
 
 import torch
-import torch.nn.functional as F
 
-from subset_kl import SubsetKLLoss as _ExternalSubsetKL
 from subset_kl import ReductionType
+from subset_kl import SubsetKLLoss as _ExternalSubsetKL
+from subset_kl import (
+    compute_subset_mc_kl,
+    select_head_tail_indices,
+    select_topk_indices,
+    subset_kl_from_gathered,
+    subset_mc_kl_from_gathered,
+)
 
 from .base import BaseLoss
 
@@ -29,99 +39,6 @@ if TYPE_CHECKING:
 
 
 SubsetMode = Literal["topk", "mc"]
-
-
-def _mc_teacher_subset(
-    teacher_logits: torch.Tensor,
-    k_head: int,
-    k_tail: int,
-) -> dict[str, torch.Tensor]:
-    """Build a deterministic top-k head plus teacher-tail Monte Carlo samples.
-
-    The tail proposal is the normalized teacher tail distribution (sampling with
-    replacement), which gives the standard importance-weighted MC tail estimate.
-    """
-    N, V = teacher_logits.shape
-    device = teacher_logits.device
-    teacher_logits_f = teacher_logits.float()
-
-    with torch.no_grad():
-        teacher_log_probs = teacher_logits_f - teacher_logits_f.logsumexp(dim=-1, keepdim=True)
-        teacher_probs = teacher_log_probs.exp()
-
-        if k_head > 0:
-            _, head_idx = teacher_logits_f.topk(k_head, dim=-1)
-            head_log_probs = torch.gather(teacher_log_probs, 1, head_idx)
-            p_head = torch.gather(teacher_probs, 1, head_idx).sum(dim=-1)
-        else:
-            head_idx = torch.empty(N, 0, device=device, dtype=torch.long)
-            head_log_probs = torch.empty(N, 0, device=device, dtype=torch.float32)
-            p_head = torch.zeros(N, device=device, dtype=torch.float32)
-
-        if k_tail > 0:
-            if k_head >= V:
-                raise ValueError("Cannot sample tail when k_head covers the vocabulary")
-            tail_probs = teacher_probs.clone()
-            if k_head > 0:
-                tail_probs.scatter_(1, head_idx, 0.0)
-            tail_mass = tail_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-            proposal_probs = tail_probs / tail_mass  # normalized teacher tail
-            tail_idx = torch.multinomial(proposal_probs, num_samples=k_tail, replacement=True)
-            tail_log_probs = torch.gather(teacher_log_probs, 1, tail_idx)
-            tail_proposal_log_probs = torch.gather(
-                proposal_probs.clamp_min(1e-45).log(), 1, tail_idx
-            )
-        else:
-            tail_idx = torch.empty(N, 0, device=device, dtype=torch.long)
-            tail_log_probs = torch.empty(N, 0, device=device, dtype=torch.float32)
-            tail_proposal_log_probs = torch.empty(N, 0, device=device, dtype=torch.float32)
-
-        indices = torch.cat([head_idx, tail_idx], dim=-1)
-
-    return {
-        "indices": indices,
-        "teacher_head_log_probs": head_log_probs,
-        "teacher_tail_log_probs": tail_log_probs,
-        "tail_proposal_log_probs": tail_proposal_log_probs,
-        "p_head": p_head,
-    }
-
-
-def _mc_tail_kl(
-    teacher_head_log_probs: torch.Tensor,
-    teacher_tail_log_probs: torch.Tensor,
-    student_log_probs: torch.Tensor,
-    p_head: torch.Tensor,
-    k_head: int,
-    k_tail: int,
-    tail_proposal_log_probs: torch.Tensor,
-) -> torch.Tensor:
-    """Exact head KL plus importance-weighted MC tail estimate.
-
-    ``student_log_probs`` must be normalized over the full vocabulary (i.e.
-    computed with the true logsumexp), so the head and tail terms compose into
-    an unbiased estimate of the full KL.
-    """
-    if k_head > 0:
-        student_head_log_probs = student_log_probs[:, :k_head]
-        head_kl = (
-            teacher_head_log_probs.exp()
-            * (teacher_head_log_probs - student_head_log_probs)
-        ).sum(dim=-1)
-    else:
-        head_kl = torch.zeros(
-            student_log_probs.shape[0],
-            device=student_log_probs.device,
-            dtype=torch.float32,
-        )
-
-    if k_tail > 0:
-        student_tail_log_probs = student_log_probs[:, k_head:]
-        tail_terms = teacher_tail_log_probs - student_tail_log_probs
-        weights = (teacher_tail_log_probs - tail_proposal_log_probs).exp()
-        tail_estimate = (weights * tail_terms).sum(dim=-1) / k_tail
-        return head_kl + tail_estimate
-    return head_kl
 
 
 class SubsetKLLoss(BaseLoss):
@@ -172,7 +89,7 @@ class SubsetKLLoss(BaseLoss):
 
         self._inner = _ExternalSubsetKL(k=self.k, reduction=reduction)
 
-    # --- BaseLoss interface ----
+    # --- BaseLoss interface (full student logits) ----
 
     def forward(
         self,
@@ -182,43 +99,38 @@ class SubsetKLLoss(BaseLoss):
         labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Compute subset KL given pre-computed student logits.
+        Compute subset KL given pre-computed (full) student logits.
 
         ``labels`` is accepted for interface compatibility but unused.
         """
         if self.mode == "mc":
-            B, T, V = teacher_logits.shape
-            subset = _mc_teacher_subset(
-                teacher_logits=teacher_logits.view(B * T, V),
+            return compute_subset_mc_kl(
+                student_logits,
+                teacher_logits,
                 k_head=self.k,
                 k_tail=self.k_tail,
+                attention_mask=attention_mask,
+                reduction=self.reduction,
             )
-            indices = subset["indices"]
-            student_flat = student_logits.view(B * T, V)
-            student_selected = torch.gather(student_flat, -1, indices)
-            student_logsumexp = student_flat.float().logsumexp(dim=-1, keepdim=True)
-            student_log_probs = student_selected.float() - student_logsumexp
-            kl = _mc_tail_kl(
-                teacher_head_log_probs=subset["teacher_head_log_probs"],
-                teacher_tail_log_probs=subset["teacher_tail_log_probs"],
-                student_log_probs=student_log_probs,
-                p_head=subset["p_head"],
-                k_head=self.k,
-                k_tail=self.k_tail,
-                tail_proposal_log_probs=subset["tail_proposal_log_probs"],
-            )
-            return self._apply_reduction(kl.view(B, T), attention_mask)
-
-        # "topk" — delegate to external SubsetKLLoss
+        # "topk" — delegate to the external SubsetKLLoss
         return self._inner.forward(student_logits, teacher_logits, attention_mask)
 
     # --- lens-aware memory-efficient path ----
 
     def prepare_teacher_subset(self, teacher_logits: torch.Tensor) -> dict[str, Any]:
-        """Precompute teacher-side subset selection for reuse across layers."""
+        """Precompute the teacher-side subset selection for reuse across layers."""
         if self.mode == "mc":
-            return self._prepare_teacher_subset_mc(teacher_logits)
-        return self._prepare_teacher_subset_topk(teacher_logits)
+            indices, teacher_log_probs_selected, p_head = select_head_tail_indices(
+                teacher_logits, k_head=self.k, k_tail=self.k_tail
+            )
+            return {
+                "mode": "mc",
+                "indices_3d": indices,
+                "teacher_log_probs_selected": teacher_log_probs_selected,
+                "p_head": p_head,
+            }
+        indices, teacher_logits_k = select_topk_indices(teacher_logits, self.k)
+        return {"mode": "topk", "indices_3d": indices, "teacher_logits_k": teacher_logits_k}
 
     def forward_with_lens(
         self,
@@ -233,8 +145,8 @@ class SubsetKLLoss(BaseLoss):
         Maximum memory efficiency: compute only k student logits.
 
         This path never materializes full [B, T, V] student logits. Instead it
-        calls ``lens.forward(..., vocab_indices=...)`` to compute student logits
-        only for the selected subset.
+        asks the lens for logits at the selected ``vocab_indices`` only, then
+        hands those to the ``subset_kl`` estimators.
 
         Parameters
         ----------
@@ -256,106 +168,62 @@ class SubsetKLLoss(BaseLoss):
         if teacher_subset is None:
             if teacher_logits is None:
                 raise ValueError("teacher_logits is required when teacher_subset is not provided")
-            subset = self.prepare_teacher_subset(teacher_logits)
-        else:
-            subset = teacher_subset
+            teacher_subset = self.prepare_teacher_subset(teacher_logits)
 
-        if subset["mode"] == "mc":
-            return self._forward_with_lens_mc(hidden_states, lens, layer, attention_mask, subset)
-        return self._forward_with_lens_topk(hidden_states, lens, layer, attention_mask, subset)
-
-    def _prepare_teacher_subset_topk(self, teacher_logits: torch.Tensor) -> dict[str, Any]:
-        with torch.no_grad():
-            top_vals, top_idx = teacher_logits.topk(k=self.k, dim=-1)
-            teacher_logprobs_k = F.log_softmax(top_vals, dim=-1)
-            teacher_probs_k = teacher_logprobs_k.exp()
-        return {
-            "mode": "topk",
-            "indices_3d": top_idx,
-            "teacher_logprobs_k": teacher_logprobs_k,
-            "teacher_probs_k": teacher_probs_k,
-        }
-
-    def _prepare_teacher_subset_mc(self, teacher_logits: torch.Tensor) -> dict[str, Any]:
-        B, T, V = teacher_logits.shape
-        subset = _mc_teacher_subset(
-            teacher_logits=teacher_logits.view(B * T, V),
-            k_head=self.k,
-            k_tail=self.k_tail,
-        )
-        indices = subset["indices"]
-        S = indices.shape[-1]
-        return {
-            "mode": "mc",
-            "indices": indices,
-            "indices_3d": indices.view(B, T, S),
-            "teacher_head_log_probs": subset["teacher_head_log_probs"],
-            "teacher_tail_log_probs": subset["teacher_tail_log_probs"],
-            "tail_proposal_log_probs": subset["tail_proposal_log_probs"],
-            "p_head": subset["p_head"],
-        }
+        if teacher_subset["mode"] == "mc":
+            return self._forward_with_lens_mc(hidden_states, lens, layer, attention_mask, teacher_subset)
+        return self._forward_with_lens_topk(hidden_states, lens, layer, attention_mask, teacher_subset)
 
     def _forward_with_lens_topk(
         self,
         hidden_states: torch.Tensor,
         lens: "BaseLens",
         layer,
-        attention_mask: Optional[torch.Tensor] = None,
-        teacher_subset: Optional[dict[str, Any]] = None,
+        attention_mask: Optional[torch.Tensor],
+        teacher_subset: dict[str, Any],
     ) -> torch.Tensor:
-        """Simple top-k with memory-efficient lens computation."""
-        if teacher_subset is None:
-            raise ValueError("teacher_subset is required")
-
+        """Top-k renormalized KL on lens-computed subset logits."""
         student_logits_k = lens.forward(
             hidden_states,
             layer=layer,
             vocab_indices=teacher_subset["indices_3d"],
         ).logits
-
-        student_logprobs_k = F.log_softmax(student_logits_k, dim=-1)
-        kl = (
-            teacher_subset["teacher_probs_k"]
-            * (teacher_subset["teacher_logprobs_k"] - student_logprobs_k)
-        ).sum(dim=-1)
-        return self._apply_reduction(kl, attention_mask)
+        return subset_kl_from_gathered(
+            student_logits_k,
+            teacher_subset["teacher_logits_k"],
+            attention_mask,
+            self.reduction,
+        )
 
     def _forward_with_lens_mc(
         self,
         hidden_states: torch.Tensor,
         lens: "BaseLens",
         layer,
-        attention_mask: Optional[torch.Tensor] = None,
-        teacher_subset: Optional[dict[str, Any]] = None,
+        attention_mask: Optional[torch.Tensor],
+        teacher_subset: dict[str, Any],
     ) -> torch.Tensor:
-        """Exact head KL plus teacher-tail MC estimate."""
-        if teacher_subset is None:
-            raise ValueError("teacher_subset is required")
+        """Exact head KL plus teacher-tail MC estimate on lens-computed subset logits.
 
-        B, T, S = teacher_subset["indices_3d"].shape
+        The MC tail needs true full-vocabulary student log-probs, so the lens
+        returns both the subset logits and the full-vocab logsumexp.
+        """
         raw_lens = lens.module if hasattr(lens, "module") else lens
-
         student_logits_subset, student_logsumexp = raw_lens.compute_logits_subset_with_logsumexp(
             activations=hidden_states,
             vocab_indices=teacher_subset["indices_3d"],
             layer=layer,
         )
-        student_log_probs = (
-            student_logits_subset.view(B * T, S).float()
-            - student_logsumexp.view(B * T, 1).float()
-        )
-
-        kl_flat = _mc_tail_kl(
-            teacher_head_log_probs=teacher_subset["teacher_head_log_probs"],
-            teacher_tail_log_probs=teacher_subset["teacher_tail_log_probs"],
-            student_log_probs=student_log_probs,
-            p_head=teacher_subset["p_head"],
+        return subset_mc_kl_from_gathered(
+            student_logits_subset,
+            teacher_subset["teacher_log_probs_selected"],
             k_head=self.k,
             k_tail=self.k_tail,
-            tail_proposal_log_probs=teacher_subset["tail_proposal_log_probs"],
+            p_head=teacher_subset["p_head"],
+            student_log_normalizer=student_logsumexp.squeeze(-1),
+            attention_mask=attention_mask,
+            reduction=self.reduction,
         )
-
-        return self._apply_reduction(kl_flat.view(B, T), attention_mask)
 
     def __repr__(self) -> str:
         return (
