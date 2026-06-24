@@ -27,34 +27,13 @@ from loralens.losses import BaseLoss, SubsetKLLoss
 from loralens.lenses import BaseLens
 from loralens.lenses.bidir_lora_lens import BidirLoRALens
 
-from .activation_sites import ActivationSitePlan
+from .activation_sites import ActivationSitePlan, get_model_input_device
 from .config import TrainConfig
 from .distributed import DDPState, all_reduce_sum
 from .amp import AMPContext
 from .model_shard import ModelShardState, disabled_shard_state
 
 logger = logging.getLogger(__name__)
-
-
-def _get_model_input_device(model: nn.Module) -> torch.device:
-    """
-    Determine which device holds the model's embedding layer.
-
-    When using ``device_map``, the embedding layer (where input_ids go)
-    may live on a different GPU than the lens.
-    """
-    # HuggingFace models with device_map have this attribute
-    if hasattr(model, "hf_device_map"):
-        # The embedding module is typically the first entry
-        for name, dev in model.hf_device_map.items():
-            if "embed" in name.lower():
-                return torch.device(dev) if isinstance(dev, (int, str)) else dev
-        # Fallback: first entry in device_map
-        first_dev = next(iter(model.hf_device_map.values()))
-        return torch.device(first_dev) if isinstance(first_dev, (int, str)) else first_dev
-
-    # Non-sharded: use first parameter's device
-    return next(model.parameters()).device
 
 
 def _masked_kl_logtarget(
@@ -149,39 +128,6 @@ class LensTrainer:
             and config.kl_chunk_size > 0
             and not self._use_subset_kl
         )
-
-    @staticmethod
-    def _normalize_activation(value):
-        """Unwrap hook payloads that come back as a singleton tuple/list."""
-        if isinstance(value, (tuple, list)):
-            if len(value) != 1:
-                raise ValueError(f"Expected a single activation tensor, got {type(value)}")
-            return value[0]
-        return value
-
-    def _collect_site_activations(
-        self,
-        hidden_states,
-        custom_activations,
-    ) -> list[tuple[str, torch.Tensor]]:
-        """Resolve ordered activation sites from hidden states and custom hooks."""
-        site_tensors = {}
-
-        for site_id, hidden_idx in self.activation_site_plan.hidden_state_sources.items():
-            site_tensors[site_id] = self._normalize_activation(hidden_states[hidden_idx])
-
-        for site_id, custom_key in self.activation_site_plan.custom_sources.items():
-            if custom_key not in custom_activations:
-                raise KeyError(f"Missing custom activation {custom_key!r} for site {site_id!r}")
-            site_tensors[site_id] = self._normalize_activation(custom_activations[custom_key])
-
-        ordered_sites = []
-        for site_id in self.activation_site_plan.site_ids:
-            if site_id not in site_tensors:
-                raise KeyError(f"Missing activation tensor for site {site_id!r}")
-            ordered_sites.append((site_id, site_tensors[site_id]))
-
-        return ordered_sites
 
     def train(
         self,
@@ -343,7 +289,7 @@ class LensTrainer:
 
         # When model-parallel, input_ids go to the model's embedding device
         if self.shard_state.enabled:
-            model_input_device = _get_model_input_device(self.model)
+            model_input_device = get_model_input_device(self.model)
             input_ids_model = input_ids.to(model_input_device, non_blocking=True)
             attn_model = attention_mask.to(model_input_device, non_blocking=True)
         else:
@@ -369,7 +315,7 @@ class LensTrainer:
         if hidden_states is None:
             raise RuntimeError("Model did not return hidden_states")
 
-        ordered_site_acts = self._collect_site_activations(hidden_states, custom_activations)
+        ordered_site_acts = self.activation_site_plan.resolve_sites(hidden_states, custom_activations)
 
         # --- Move outputs to lens device (model-parallel path) ---
         if self.shard_state.enabled:
@@ -506,8 +452,8 @@ class LensTrainer:
         if write_type in ("suffix", "both"):
             resid_sites = [str(lid) for lid in layer_ids if str(lid).endswith(".resid_post")]
             # Use the lens device tensors (input_ids_model may be deleted in sharded path).
-            _ids  = input_ids.to(_get_model_input_device(self.model)) if self.shard_state.enabled else input_ids
-            _attn = attention_mask.to(_get_model_input_device(self.model)) if self.shard_state.enabled else attention_mask
+            _ids  = input_ids.to(get_model_input_device(self.model)) if self.shard_state.enabled else input_ids
+            _attn = attention_mask.to(get_model_input_device(self.model)) if self.shard_state.enabled else attention_mask
             with amp_ctx.autocast():
                 suffix_loss = self._compute_write_suffix_loss(
                     raw_lens=raw_lens,

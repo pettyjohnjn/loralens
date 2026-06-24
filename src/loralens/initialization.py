@@ -12,7 +12,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 from loralens.lenses.lora_lens import LoRALens
-from loralens.training.activation_sites import ActivationSitePlan
+from loralens.training.activation_sites import ActivationSitePlan, get_model_input_device
 from loralens.training.distributed import DDPState, all_reduce_sum
 from loralens.training.model_shard import ModelShardState
 
@@ -50,16 +50,6 @@ class _LayerStats:
     sum_y2: torch.Tensor
     xtx: torch.Tensor
     xty: torch.Tensor
-
-
-def _get_model_input_device(model: torch.nn.Module) -> torch.device:
-    if hasattr(model, "hf_device_map"):
-        for name, dev in model.hf_device_map.items():
-            if "embed" in name.lower():
-                return torch.device(dev) if isinstance(dev, (int, str)) else dev
-        first_dev = next(iter(model.hf_device_map.values()))
-        return torch.device(first_dev) if isinstance(first_dev, (int, str)) else first_dev
-    return next(model.parameters()).device
 
 
 def initialize_lora_lens(
@@ -166,7 +156,7 @@ def _collect_calibration_stats(
             global_tokens += global_batch_tokens
 
             if shard_state is not None and shard_state.enabled:
-                model_input_device = _get_model_input_device(model)
+                model_input_device = get_model_input_device(model)
                 input_ids_model = input_ids.to(model_input_device, non_blocking=True)
                 attn_model = attention_mask.to(model_input_device, non_blocking=True)
             else:
@@ -183,11 +173,7 @@ def _collect_calibration_stats(
             if hidden_states is None:
                 raise RuntimeError("Model did not return hidden_states during calibration")
 
-            ordered = _collect_site_activations(
-                activation_site_plan,
-                hidden_states,
-                activations.custom,
-            )
+            ordered = activation_site_plan.resolve_sites(hidden_states, activations.custom)
             site_map = dict(ordered)
             y_full = hidden_states[-1]
 
@@ -238,38 +224,6 @@ def _next_batch(
     except StopIteration:
         data_iter = iter(dataloader_factory())
         return next(data_iter), data_iter
-
-
-def _normalize_activation(value):
-    if isinstance(value, (tuple, list)):
-        if len(value) != 1:
-            raise ValueError(f"Expected a single activation tensor, got {type(value)}")
-        return value[0]
-    return value
-
-
-def _collect_site_activations(
-    activation_site_plan: ActivationSitePlan,
-    hidden_states,
-    custom_activations,
-) -> list[tuple[str, torch.Tensor]]:
-    site_tensors = {}
-
-    for site_id, hidden_idx in activation_site_plan.hidden_state_sources.items():
-        site_tensors[site_id] = _normalize_activation(hidden_states[hidden_idx])
-
-    for site_id, custom_key in activation_site_plan.custom_sources.items():
-        if custom_key not in custom_activations:
-            raise KeyError(f"Missing custom activation {custom_key!r} for site {site_id!r}")
-        site_tensors[site_id] = _normalize_activation(custom_activations[custom_key])
-
-    ordered_sites = []
-    for site_id in activation_site_plan.site_ids:
-        if site_id not in site_tensors:
-            raise KeyError(f"Missing activation tensor for site {site_id!r}")
-        ordered_sites.append((site_id, site_tensors[site_id]))
-
-    return ordered_sites
 
 
 def _accumulate_layer_stats(

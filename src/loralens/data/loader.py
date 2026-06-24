@@ -142,12 +142,7 @@ class ChunkedTextDataset(IterableDataset):
         self.max_docs = max_docs
 
     def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
-        tokenizer = self.tokenizer
-        chunk_cfg = self.chunk_cfg
-        seq_len = chunk_cfg.seq_len
-        stride = chunk_cfg.stride or seq_len
-
-        if chunk_cfg.document_separated:
+        if self.chunk_cfg.document_separated:
             yield from self._iter_document_separated()
         else:
             yield from self._iter_concatenated()

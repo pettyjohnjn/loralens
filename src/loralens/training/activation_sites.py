@@ -4,9 +4,34 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
-from typing import Dict, List, Literal
+from typing import Dict, List, Literal, Tuple
 
+import torch
 import torch.nn as nn
+
+
+def normalize_activation(value):
+    """Unwrap a hook payload that comes back as a singleton tuple/list."""
+    if isinstance(value, (tuple, list)):
+        if len(value) != 1:
+            raise ValueError(f"Expected a single activation tensor, got {type(value)}")
+        return value[0]
+    return value
+
+
+def get_model_input_device(model: nn.Module) -> torch.device:
+    """Device holding the model's input embedding (where ``input_ids`` go).
+
+    With HuggingFace ``device_map`` sharding, the embedding may live on a
+    different GPU than other layers; fall back to the first parameter's device.
+    """
+    if hasattr(model, "hf_device_map"):
+        for name, dev in model.hf_device_map.items():
+            if "embed" in name.lower():
+                return torch.device(dev) if isinstance(dev, (int, str)) else dev
+        first_dev = next(iter(model.hf_device_map.values()))
+        return torch.device(first_dev) if isinstance(first_dev, (int, str)) else first_dev
+    return next(model.parameters()).device
 
 
 ActivationSitePreset = Literal[
@@ -29,6 +54,34 @@ class ActivationSitePlan:
     @property
     def site_count(self) -> int:
         return len(self.site_ids)
+
+    def resolve_sites(
+        self,
+        hidden_states,
+        custom_activations,
+    ) -> List[Tuple[str, torch.Tensor]]:
+        """Resolve this plan's ordered sites to ``(site_id, tensor)`` pairs.
+
+        Pulls residual-stream positions from ``hidden_states`` and custom-hook
+        outputs from ``custom_activations``, in ``site_ids`` order.
+        """
+        site_tensors = {}
+
+        for site_id, hidden_idx in self.hidden_state_sources.items():
+            site_tensors[site_id] = normalize_activation(hidden_states[hidden_idx])
+
+        for site_id, custom_key in self.custom_sources.items():
+            if custom_key not in custom_activations:
+                raise KeyError(f"Missing custom activation {custom_key!r} for site {site_id!r}")
+            site_tensors[site_id] = normalize_activation(custom_activations[custom_key])
+
+        ordered_sites = []
+        for site_id in self.site_ids:
+            if site_id not in site_tensors:
+                raise KeyError(f"Missing activation tensor for site {site_id!r}")
+            ordered_sites.append((site_id, site_tensors[site_id]))
+
+        return ordered_sites
 
 
 def build_activation_site_plan(
