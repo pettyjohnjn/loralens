@@ -61,14 +61,9 @@ class LoRAProjection(nn.Module):
         self.alpha = alpha
         self.scaling = alpha / r if r > 0 else 0.0
 
-        # Only low-rank matrices - NO d×d base!
         self.lora_A = nn.Linear(hidden_size, r, bias=False)
         self.lora_B = nn.Linear(r, hidden_size, bias=False)
-
-        # Optional bias (small: just d parameters)
         self.bias = nn.Parameter(torch.zeros(hidden_size))
-
-        # Dropout
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
         self._reset_parameters()
@@ -160,11 +155,9 @@ class LoRALens(BaseLens):
         self.alpha = alpha
         self.unembed = unembed
 
-        # Freeze unembed
         for p in self.unembed.parameters():
             p.requires_grad = False
 
-        # Create per-layer LoRA projections (NO d×d matrices!)
         self._layer_ids = [canonical_layer_id(lid) for lid in layer_ids]
         self._module_keys = {
             lid: module_safe_layer_key(lid) for lid in self._layer_ids

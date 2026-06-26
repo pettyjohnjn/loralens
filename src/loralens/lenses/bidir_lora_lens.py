@@ -52,10 +52,6 @@ class BidirLoRALens(LoRALens):
         Free to compute alongside the read loss.
     """
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers                                                      #
-    # ------------------------------------------------------------------ #
-
     def _get_W_U(self) -> torch.Tensor:
         """Return lm_head weight [V, d] from the frozen unembed module."""
         wb = unembed_weight_bias(self.unembed)
@@ -117,10 +113,6 @@ class BidirLoRALens(LoRALens):
             result = h_f - hU_Cinv @ (B_f.T * s)
 
         return result.to(h.dtype)
-
-    # ------------------------------------------------------------------ #
-    # Public write-direction API                                            #
-    # ------------------------------------------------------------------ #
 
     def compute_write_injection(
         self,

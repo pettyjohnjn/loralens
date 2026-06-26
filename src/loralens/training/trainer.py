@@ -400,7 +400,7 @@ class LensTrainer:
                             layer_loss = self._compute_chunked_kl_loss(
                                 lens=lens,
                                 h_full_raw=h_full_raw,
-                                teacher_logprobs_full=teacher_logits_full,  # Already log-probs!
+                                teacher_logprobs_full=teacher_logits_full,  # already log-probs
                                 attn_full=attn_full,
                                 layer_id=layer_id,
                                 shift=shift,
@@ -476,7 +476,7 @@ class LensTrainer:
         self,
         lens: nn.Module,
         h_full_raw: torch.Tensor,
-        teacher_logprobs_full: torch.Tensor,  # Already log-softmax!
+        teacher_logprobs_full: torch.Tensor,  # already log-softmax
         attn_full: torch.Tensor,
         layer_id,
         shift: int,
